@@ -1,0 +1,10 @@
+fastapi==0.110.1
+uvicorn[standard]==0.29.0
+openai
+boto3
+selenium
+webdriver_manager
+langdetect
+pymysql
+python-multipart
+aiofiles
