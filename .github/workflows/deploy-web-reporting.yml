@@ -31,6 +31,8 @@ jobs:
         script: |
           sudo docker stop web_reporting || true
           sudo docker rm web_reporting || true
-          docker rmi web_reporting:latest || true
-          docker build -t web_reporting .
-          docker run -d --name web_reporting -p 5001:5001 web_reporting
+          sudo docker rmi web_reporting:latest || true
+          sudo docker build -t web_reporting .
+          sudo docker run -d --name web_reporting -p 5001:5001 \
+            -e CHATGPT_API_KEY=${{ secrets.CHATGPT_API_KEY }} \
+            web_reporting
