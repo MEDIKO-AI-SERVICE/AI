@@ -1,0 +1,36 @@
+name: Deploy Web Reporting to EC2
+
+on:
+  push:
+    branches:
+      - web-reporting
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+
+    - name: Copy project to EC2
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.HOST_WEB_REPORTING }}
+        username: ubuntu
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        source: "."
+        target: "/home/ubuntu/web-reporting"
+
+    - name: Build and run Docker on EC2
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.HOST_WEB_REPORTING }}
+        username: ubuntu
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          sudo docker stop web_reporting || true
+          sudo docker rm web_reporting || true
+          docker rmi web_reporting:latest || true
+          docker build -t web_reporting .
+          docker run -d --name web_reporting -p 5001:5001 web_reporting
