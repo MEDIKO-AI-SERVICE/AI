@@ -25,7 +25,7 @@ app.add_middleware(
 )
 
 
-@app.post("/reportapi/fill_form")
+@app.post("/api/report/fill_form")
 async def fill_form(
     name: str = Form(...),
     number: str = Form(...),
