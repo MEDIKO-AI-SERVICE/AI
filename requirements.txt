@@ -1,0 +1,9 @@
+openai
+pymongo
+boto3
+pytz
+langdetect
+pymysql
+fastapi
+uvicorn[standard]
+certifi
