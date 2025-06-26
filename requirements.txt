@@ -7,3 +7,4 @@ pymysql
 fastapi
 uvicorn[standard]
 certifi
+requests

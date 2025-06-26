@@ -12,13 +12,13 @@ DB_CONFIG = {
     "cursorclass": pymysql.cursors.DictCursor  #결과를 딕셔너리 형태로 반환
 }
 
-#언어 매핑(0~4 : 언어명)
+#언어 매핑
 LANGUAGE_MAPPING = {
-    1: "Chinese",
-    2: "Vietnamese",
-    3: "Mongolian",
-    4: "English",
-    5: "Korean"
+    1: "Korean",
+    2: "English",
+    3: "Vietnamese",
+    4: "Chinese_Simplified",
+    5: "Chinese_Traditional"
 }
 
 #main language 조회 함수

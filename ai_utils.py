@@ -4,18 +4,38 @@ import json
 import boto3
 import tempfile
 import openai
-import os
-import pytz
-from datetime import datetime
+import requests
+from langdetect import detect
 
 config = configparser.ConfigParser()
 config.read('keys.config')
 openai.api_key = config['API_KEYS']['chatgpt_api_key']
 
-import base64
-def encode_audio_to_base64(file_path):
-    with open(file_path, "rb") as audio_file:
-        return base64.b64encode(audio_file.read()).decode("utf-8")
+    
+def download_audio_from_s3_presigned_url(presigned_url):
+    """
+    S3 presigned URL에서 오디오 파일을 다운로드하여 임시 파일로 저장
+    :param presigned_url: S3 presigned URL
+    :return: 임시 파일 경로
+    """
+    try:
+        response = requests.get(presigned_url, stream=True)
+        response.raise_for_status()
+        
+        #임시 파일 생성
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_file_path = temp_file.name
+        
+        #파일에 데이터 쓰기
+        for chunk in response.iter_content(chunk_size=8192):
+            temp_file.write(chunk)
+        
+        temp_file.close()
+        return temp_file_path
+        
+    except Exception as e:
+        print(f"S3에서 오디오 파일 다운로드 실패: {e}")
+        raise e
     
 def transcribe_audio(file_path):
     """
@@ -32,16 +52,16 @@ def transcribe_audio(file_path):
     return transcript.text
 
 LANGUAGE_MAP = {
-    #"af": "Afrikaans",
-    #"ar": "Arabic",
-    #"bg": "Bulgarian",
-    #"bn": "Bengali",
-    #"ca": "Catalan",
-    #"cs": "Czech",
-    #"cy": "Welsh",
-    #"da": "Danish",
-    #"de": "German",
-    #"el": "Greek",
+    "af": "Afrikaans",
+    "ar": "Arabic",
+    "bg": "Bulgarian",
+    "bn": "Bengali",
+    "ca": "Catalan",
+    "cs": "Czech",
+    "cy": "Welsh",
+    "da": "Danish",
+    "de": "German",
+    "el": "Greek",
     "en": "English",
     "es": "Spanish",
     "et": "Estonian",
@@ -52,7 +72,7 @@ LANGUAGE_MAP = {
     "he": "Hebrew",
     "hi": "Hindi",
     "hr": "Croatian",
-    #"hu": "Hungarian",
+    "hu": "Hungarian",
     "id": "Indonesian",
     "it": "Italian",
     "ja": "Japanese",
@@ -89,145 +109,65 @@ LANGUAGE_MAP = {
     "zh-tw": "Chinese(Traditional)"
 }
 
-from langdetect import detect
-def detect_language(text, gpt_detected=None):
+
+
+def translate_text_simple(text, tag, main_language="English"):
     """
-    입력된 텍스트의 언어를 감지하여 언어명 반환
-    GPT 감지 결과가 주어지면 이를 우선 적용
+    단순화된 번역 함수
+    - 환자(tag=0): 한국어로 번역
+    - 의료진(tag=1): main_language로 번역
+    :param text: 번역할 텍스트
+    :param tag: 화자 구분 (0: 환자, 1: 의료진)
+    :param main_language: 의료진의 주요 언어 (기본값: English)
+    :return: 번역 결과 딕셔너리
     """
-    try:
-        #GPT 감지 결과가 있으면 우선 사용
-        if gpt_detected:
-            print(f"GPT 감지 결과 사용: {gpt_detected}")
-            return gpt_detected if gpt_detected in LANGUAGE_MAP.values() else None
-
-        #langdetect를 통한 감지
-        lang_code = detect(text)
-        print(f"Detected language code: {lang_code}")  #감지된 코드 확인
-        
-        result = LANGUAGE_MAP.get(lang_code)
-        if result is None:
-            print(f"매핑되지 않은 언어 코드: {lang_code}")  #디버깅용 로그 추가
-        return result
-    except Exception as e:
-        print(f"언어 감지 실패: {e}")
-        return None 
-
-def summarize_text(text):
-    prompt = f"""
-        Summarize the following conversation based on the **Original text** from the transcripts.  
-        Ensure that the summary captures key points, emotions, and main ideas.  
-        Provide the summary in **both Korean and English**.
-        
-        Some sentences may begin with a tag such as "Doctor:" or "Patient:". 
-        These tags indicate who might be speaking, but they are not always accurate. 
-        Use them only as helpful context, not as definitive labels.
-        
-        Original Text:
-        {text}
-
-        Respond strictly in the following JSON format **without additional text or explanations**:
-        {{
-        "summary_korean": "<summary_in_korean>",
-        "summary_english": "<summary_in_english>"
-        }}
-        """
-
-    response = openai.chat.completions.create(
-        model="gpt-4", messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text}
-        ]
-    )
-    return response.choices[0].message.content
-
-
-def translate_text(text, previous_languages=[]):
-    """
-    입력된 텍스트에서 사용된 언어를 감지하고, 기존 감지된 언어를 고려하여 번역을 수행.
-    :param text: 번역할 원본 텍스트
-    :param previous_languages: 세션에서 이전에 감지된 언어 리스트
-    :return: 감지된 언어 리스트, 번역 결과 (한국어, 영어, 추가 감지 언어 포함)
-    """
+    if tag == 0:
+        target_language = "Korean"
+    elif tag == 1:
+        target_language = main_language
+    else:
+        #기본값
+        target_language = "Korean"
     
     prompt = f"""
-    Detect the language of the following text and return a JSON response **without any formatting such as markdown or code blocks**. 
-    Then, translate it into Korean and English.  
-    Also, include the original text under the key of the detected language (e.g., "Chinese") even if it's not Korean or English.  
-    If there are any previously detected languages, also translate into those and include them in the 'translations' object.
-
-    Previously detected languages: {', '.join(previous_languages) if previous_languages else 'None'}.
-
+    Translate the following text to {target_language}.
     Text: {text}
-
-    Respond strictly in the following JSON format **without additional text or explanations**:
-    {{
-    "detected_language": "<detected_language>",
-    "translations": {{
-        "Korean": "<translated_text>",
-        "English": "<translated_text>"
-    }}
-    }}
-
-    If the detected language is different from Korean or English, add it to the 'translations' object using its language name as the key. 
-    Additionally, if there are any previously detected languages, also add them to the 'translations' object. 
-    For example, if the detected language is 'Vietnamese' and a previously detected language was 'Chinese', return:
-    {{
-    "detected_language": "Vietnamese",
-    "translations": {{
-        "Korean": "<translated_text>",
-        "English": "<translated_text>",
-        "Vietnamese": "<original_text>",
-        "Chinese": "<translated_text>"
-    }}
-    }}
-    Do NOT skip the detected language in the 'translations' object. Always include it.
+    
+    Respond with only the translated text, no additional formatting or explanations.
     """
-
-    response = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    response_text = response.choices[0].message.content.strip()
-    print(f"GPT Response:\n{response_text}")  #디버깅용
-
+    
     try:
-        result = json.loads(response_text)
-        source_language = result.get("detected_language")
-
-        #'source_language'도 번역 대상 언어에 추가
-        detected_languages = list(set(previous_languages + [source_language]))
-        translations = result.get("translations", {})
-
-        #None 값을 빈 JSON '{}'으로 변환하여 MongoDB 저장 시 일관성 유지
-        for lang, translation in translations.items():
-            if translation is None or not translation.strip():
-                translations[lang] = {}
-
-    except json.JSONDecodeError:
-        print("GPT 응답을 JSON으로 변환할 수 없음.")
-        #한 번만 재시도
-        response_retry = openai.chat.completions.create(
+        response = openai.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}]
         )
-        try:
-            result = json.loads(response_retry.choices[0].message.content.strip())
-        except json.JSONDecodeError:
-            print("재시도 실패. fallback 적용.")
-            return {
-                "source_language": detect_language(text),
-                "detected_languages": previous_languages,
-                "translations": {}
+        translated_text = response.choices[0].message.content.strip()
+        
+        return {
+            "translations": {
+                target_language: {"text": translated_text}
             }
+        }
+    except Exception as e:
+        print(f"번역 실패: {e}")
+        return {
+            "translations": {
+                target_language: {"text": text}  #번역 실패 시 원문 반환
+            }
+        }
 
-    return {
-        "source_language": source_language,
-        "detected_languages": detected_languages,  #'source_language'를 포함한 언어 목록 유지
-        "translations": translations
-    }
-
+def detect_language_simple(text):
+    """
+    텍스트의 언어를 감지하는 단순화된 함수
+    :param text: 감지할 텍스트
+    :return: 감지된 언어명
+    """
+    try:
+        lang_code = detect(text)
+        return LANGUAGE_MAP.get(lang_code, "Unknown")
+    except Exception as e:
+        print(f"언어 감지 실패: {e}")
+        return "Unknown"
 
 #AWS S3 설정
 S3_BUCKET_NAME = config['S3_INFO']['BUCKET_NAME']
@@ -244,22 +184,78 @@ def upload_to_s3(file, folder, file_name):
     print(f"파일 업로드 완료: {s3_url}")
     return s3_url
 
-#화자 판단(베타 버전)
-def classify_speaker(transcript):
+def generate_tts_for_translation(text, language="Korean"):
+    """
+    번역된 텍스트에 대해 TTS 생성
+    :param text: TTS로 변환할 텍스트
+    :param language: 언어 (기본값: Korean)
+    :return: 생성된 오디오 파일 경로
+    """
     try:
-        prompt = f"""
-        This audio is a spoken sentence from either a doctor or a patient.
-        Determine who is speaking in the following sentence: "{transcript}"
-        If it's the doctor, reply with "Doctor".
-        If it's the patient, reply with "Patient".
-        Only respond with one of these two values.
-        """
+        #OpenAI TTS API 사용
+        response = openai.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=text
+        )
+        
+        #임시 파일로 저장
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_file_path = temp_file.name
+        temp_file.close()
+        
+        #오디오 데이터를 파일에 저장
+        with open(temp_file_path, "wb") as f:
+            f.write(response.content)
+        
+        return temp_file_path
+        
+    except Exception as e:
+        print(f"TTS 생성 실패: {e}")
+        raise e
+
+def create_session_summary(transcripts, main_language="Korean"):
+    """
+    세션의 모든 대화를 요약하여 한줄 요약과 상세 요약 생성
+    :param transcripts: 세션의 모든 대화 기록
+    :param main_language: 사용자의 주언어
+    :return: 요약 결과 딕셔너리
+    """
+    #대화 내용을 하나의 텍스트로 결합
+    conversation_text = "\n".join([
+        f"{t['tag']}: {t['original']}" if t.get('tag') else t['original']
+        for t in transcripts
+    ])
+    
+    prompt = f"""
+    Create a summary of the following medical conversation in {main_language}.
+    
+    Conversation:
+    {conversation_text}
+    
+    Please provide:
+    1. A one-line summary (maximum 50 characters)
+    2. A detailed summary (maximum 300 characters)
+    
+    Respond in the following JSON format:
+    {{
+        "one_line_summary": "brief summary",
+        "detailed_summary": "detailed summary"
+    }}
+    """
+    
+    try:
         response = openai.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}]
         )
-        tag = response.choices[0].message.content.strip()
-        return tag if tag in ["Doctor", "Patient"] else "Unknown"
+        
+        summary_text = response.choices[0].message.content.strip()
+        return json.loads(summary_text)
+        
     except Exception as e:
-        print(f"[ERROR] classify_speaker 실패: {e}", flush=True)
-        return "Unknown"
+        print(f"요약 생성 실패: {e}")
+        return {
+            "one_line_summary": "대화 요약",
+            "detailed_summary": "의료 상담 내용에 대한 요약"
+        }
