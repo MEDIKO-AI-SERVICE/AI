@@ -32,7 +32,7 @@ class HospitalRecommender:
         self.policy_network=PolicyNetwork()
         self.optimizer=torch.optim.Adam(self.policy_network.parameters())
         self.gamma=0.99
-        self.K=15
+        self.K=30
         self.feedback_manager=FeedbackManager(db_connection) if db_connection else None
 
     def get_embedding(self, text_list, batch_size=256):
@@ -58,6 +58,17 @@ class HospitalRecommender:
 
     def embed_user_profile(self, basic_info, health_info, suspected_disease=None, department=None):
         #사용자 건강 정보, 기본 정보를 OpenAI Embedding을 활용하여 벡터화
+        
+        # department가 리스트인 경우 문자열로 변환
+        if isinstance(department, list):
+            department = ", ".join(department)
+        
+        # 여러 진료과 처리 (쉼표로 구분된 경우)
+        if department and ',' in department:
+            departments = [dept.strip() for dept in department.split(',')]
+            department_text = ', '.join(departments)
+        else:
+            department_text = department or "unknown"
 
         text_data="의심질병: {suspected_disease}, 진료과: {department}, 가족력: {family}, 성별: {gender}, 병력: {past}, 복용약: {med}".format(
             gender=basic_info.get("gender", "unknown"),
@@ -65,7 +76,7 @@ class HospitalRecommender:
             family=health_info.get("familyHistory", "unknown"),
             med=health_info.get("nowMedicine", "unknown"),
             suspected_disease=suspected_disease or "unknown",
-            department=department or "unknown"
+            department=department_text
         )
 
         text_embedding=self.get_embedding([text_data])[0] 

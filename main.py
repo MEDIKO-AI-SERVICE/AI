@@ -102,13 +102,12 @@ def run_scheduler():
 def startup_event():
     threading.Thread(target=run_scheduler, daemon=True).start()
     initialize_recommenders()
+    
 @app.post("/api/recommend/hospital")
 async def recommend_hospital(request: Request):
     global hospital_recommender
     if not hospital_recommender:
         initialize_recommenders()
-
-    total_start_time = time.time()
 
     data = await request.json()
     print(f"[hospital] Request data: {data}", flush=True)
@@ -116,12 +115,17 @@ async def recommend_hospital(request: Request):
     basic_info = data.get("basic_info")
     health_info = data.get("health_info")
     department = data.get("department", "내과")
+    # department가 리스트인 경우 문자열로 변환, 문자열인 경우 그대로 사용
+    if isinstance(department, list):
+        department = ", ".join(department)
     suspected_disease = data.get("suspected_disease")
+    primary_hospital = data.get("primary_hospital", False)
     secondary_hospital = data.get("secondary_hospital", False)
     tertiary_hospital = data.get("tertiary_hospital", False)
     member_id = data.get("member_id")
     user_lat = data.get("lat")
     user_lon = data.get("lon")
+    sort_type = data.get("sort_type", "distance")  # "recommend" 또는 "distance"
 
     try:
         coords = address_to_coords(basic_info['address'])
@@ -134,7 +138,7 @@ async def recommend_hospital(request: Request):
         user_lat = coords['lat']
         user_lon = coords['lon']
 
-    es_results = query_elasticsearch_hosp(user_lat, user_lon, department, secondary_hospital, tertiary_hospital)
+    es_results = query_elasticsearch_hosp(user_lat, user_lon, department, primary_hospital, secondary_hospital, tertiary_hospital)
     if "hits" not in es_results or not es_results["hits"]["hits"]:
         return JSONResponse(content={"message": "No hospitals found"}, status_code=404)
 
@@ -156,20 +160,31 @@ async def recommend_hospital(request: Request):
     df["transit_travel_time_s"] = df["travel_info"].apply(lambda x: x.get("transit_travel_time_s") if x else None)
     df.drop(columns=["travel_info"], inplace=True)
 
-    user_embedding = hospital_recommender.embed_user_profile(basic_info, health_info, suspected_disease, department)
-    hospital_embeddings = hospital_recommender.embed_hospital_data(df)
+    # 정렬 타입에 따른 처리
+    if sort_type == "distance":
+        # 거리순 정렬 (강화학습 없이 거리만 고려)
+        total_travel_time = (
+            df['transit_travel_time_h'] * 3600 +
+            df['transit_travel_time_m'] * 60 +
+            df['transit_travel_time_s']
+        )
+        df['similarity'] = 1 / (1 + total_travel_time)  # 거리가 가까울수록 높은 점수
+        recommended_hospitals = df.sort_values(by=["similarity"], ascending=[False])
+    else:
+        # 추천순 정렬 (기존 강화학습 로직)
+        user_embedding = hospital_recommender.embed_user_profile(basic_info, health_info, suspected_disease, department)
+        hospital_embeddings = hospital_recommender.embed_hospital_data(df)
 
-    recommended_hospitals = hospital_recommender.recommend_hospitals(
-        user_embedding=user_embedding,
-        hospital_embeddings=hospital_embeddings,
-        hospitals_df=df,
-        member_id=member_id
-    )
+        recommended_hospitals = hospital_recommender.recommend_hospitals(
+            user_embedding=user_embedding,
+            hospital_embeddings=hospital_embeddings,
+            hospitals_df=df,
+            member_id=member_id
+        )
 
     for col in ["transit_travel_time_h", "transit_travel_time_m", "transit_travel_time_s"]:
         recommended_hospitals.loc[recommended_hospitals[col].isnull(), col] = 0
 
-    recommended_hospitals = recommended_hospitals.sort_values(by=["similarity"], ascending=[False])
     recommended_hospitals.reset_index(drop=True, inplace=True)
 
     if basic_info.get("language", "").lower() != "ko":
@@ -200,6 +215,7 @@ async def recommend_pharmacy(request: Request):
     user_lon = data.get('lon')
     basic_info = data.get("basic_info")
     member_id = data.get("member_id")
+    sort_type = data.get("sort_type", "distance")  # "recommend" 또는 "distance"
 
     try:
         coords = address_to_coords(basic_info['address'])
@@ -242,7 +258,20 @@ async def recommend_pharmacy(request: Request):
         for col in ["transit_travel_distance_km", "transit_travel_time_h", "transit_travel_time_m", "transit_travel_time_s"]:
             df.loc[df[col].isnull(), col] = 0
 
-        recommended_pharmacies = pharmacy_recommender.recommend_pharmacies(df, member_id=member_id)
+        # 정렬 타입에 따른 처리
+        if sort_type == "distance":
+            # 거리순 정렬 (강화학습 없이 거리만 고려)
+            total_travel_time = (
+                df['transit_travel_time_h'] * 3600 +
+                df['transit_travel_time_m'] * 60 +
+                df['transit_travel_time_s']
+            )
+            df['similarity'] = 1 / (1 + total_travel_time)  # 거리가 가까울수록 높은 점수
+            recommended_pharmacies = df.sort_values(by=["similarity"], ascending=[False])
+        else:
+            # 추천순 정렬 (기존 강화학습 로직)
+            recommended_pharmacies = pharmacy_recommender.recommend_pharmacies(df, member_id=member_id)
+
         recommended_pharmacies = recommended_pharmacies.sort_values(by=["similarity"], ascending=[False])
         recommended_pharmacies = recommended_pharmacies.reset_index(drop=True)
 

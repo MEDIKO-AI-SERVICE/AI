@@ -23,7 +23,7 @@ class PharmacyRecommender:
         self.policy_network=PolicyNetwork()
         self.optimizer=torch.optim.Adam(self.policy_network.parameters())
         self.gamma=0.99
-        self.K=15
+        self.K=30
         self.feedback_manager=FeedbackManager(db_connection) if db_connection else None
 
     def update_from_feedback(self, member_id):
