@@ -266,7 +266,8 @@ async def get_session_detail(member_id: int, session_id: str):
             "chat_id": t.get("chat_id"),
             "original": original,
             "translations": translations,
-            "tag": t.get("tag")
+            "tag": t.get("tag"),
+            "tts": t.get("tts")
         }
         scripts.append(script_item)
     created_at = session.get("created_at")
