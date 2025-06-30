@@ -1,72 +1,60 @@
+import faiss
 import openai
 import json
 import numpy as np
-from configparser import ConfigParser
-from typing import List, Dict, Any
-import boto3
-import io
+import configparser
+import pandas as pd
+import sys
+import os
 
-#API 키 설정
-config=ConfigParser()
-config.read('keys.config')
-openai.api_key=config['API_KEYS']['chatgpt_api_key']
+def get_embedding(text, openai_api_key):
+    openai.api_key = openai_api_key
+    response = openai.Embedding.create(
+        input=text,
+        model="text-embedding-ada-002"
+    )
+    return np.array(response['data'][0]['embedding'], dtype=np.float32)
 
-def load_vector_db() -> List[Dict[str, Any]]:
-    #S3에서 벡터 DB JSON을 로드
-    config=ConfigParser()
+def load_index_and_meta(index_path, meta_path):
+    index = faiss.read_index(index_path)
+    with open(meta_path, 'r', encoding='utf-8') as f:
+        meta = json.load(f)
+    return index, meta
+
+def search_similar_diseases(symptom_list, index_path, meta_path, top_k=3):
+    config = configparser.ConfigParser()
     config.read('keys.config')
+    openai_api_key = config['API_KEYS']['chatgpt_api_key']
+    text = ', '.join(symptom_list)
+    query_emb = get_embedding(text, openai_api_key).reshape(1, -1)
+    index, meta = load_index_and_meta(index_path, meta_path)
+    D, I = index.search(query_emb, top_k)
+    results = [meta[i] for i in I[0]]
+    return results
 
-    s3=boto3.client(
-        's3',
-        aws_access_key_id=config['S3_INFO']['ACCESS_KEY_ID'],
-        aws_secret_access_key=config['S3_INFO']['SECRET_ACCESS_KEY']
-    )
+def evaluate_rag(test_csv, index_path, meta_path, top_k=3):
+    config = configparser.ConfigParser()
+    config.read('keys.config')
+    openai_api_key = config['API_KEYS']['chatgpt_api_key']
+    df = pd.read_csv(test_csv)
+    symptom_cols = [col for col in df.columns if col.lower() != 'disease']
+    correct = 0
+    total = 0
+    for _, row in df.iterrows():
+        symptoms_present = [col for col in symptom_cols if row[col] == 1]
+        true_disease = row['Disease']
+        results = search_similar_diseases(symptoms_present, index_path, meta_path, top_k=top_k)
+        if results and results[0]['disease'] == true_disease:
+            correct += 1
+        total += 1
+    accuracy = correct / total if total > 0 else 0
+    print(f"Top-1 Accuracy (Top-{top_k} retrieved): {accuracy:.4f} ({correct}/{total})")
 
-    bucket=config['S3_INFO']['BUCKET_NAME2']
-    key='medical_data/vectorized_data.json'
-
-    response=s3.get_object(Bucket=bucket, Key=key)
-    content=response['Body'].read().decode('utf-8')
-    return json.loads(content)
-
-def create_query_embedding(query: str) -> np.ndarray:
-    #쿼리 텍스트의 임베딩 생성
-    response=openai.embeddings.create(
-        model="text-embedding-3-small",
-        input=[query],
-        encoding_format="float"
-    )
-    return np.array(response.data[0].embedding)
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    #코사인 유사도 계산
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-def search_similar_conditions(symptoms: List[Dict], top_k: int=3) -> List[Dict]:
-    #사용자 증상에 기반하여 유사 질병 정보 검색
-    
-    #증상 텍스트 생성
-    symptom_text=" ".join([
-        f"{', '.join(s.get('macro_body_parts', []))} {', '.join(s.get('micro_body_parts', []))} {json.dumps(s.get('symptom_details', {}), ensure_ascii=False)}"
-        for s in symptoms
-    ])
-    
-    #쿼리 임베딩 생성
-    query_embedding=create_query_embedding(symptom_text)
-    
-    #벡터 DB 로드
-    vector_db=load_vector_db()
-    
-    #유사도 계산 및 정렬
-    results=[]
-    for item in vector_db:
-        similarity=cosine_similarity(query_embedding, np.array(item["embedding"]))
-        results.append({
-            "disease": item["disease"],
-            "symptoms": item["symptoms"],
-            "similarity": float(similarity)
-        })
-    
-    #유사도 기준 정렬 및 상위 k개 반환
-    results.sort(key=lambda x: x["similarity"], reverse=True)
-    return results[:top_k] 
+if __name__ == "__main__":
+    if len(sys.argv) < 4:
+        print("Usage: python rag_search.py <test_csv> <index_path> <meta_path>")
+        sys.exit(1)
+    test_csv = sys.argv[1]
+    index_path = sys.argv[2]
+    meta_path = sys.argv[3]
+    evaluate_rag(test_csv, index_path, meta_path, top_k=3) 

@@ -11,3 +11,5 @@ requests
 boto3
 mysql-connector-python
 schedule
+faiss-cpu
+configparser

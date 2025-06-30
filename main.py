@@ -21,87 +21,67 @@ import pandas as pd
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from gpt_utils.prompting_gpt import *
+from gpt_utils.prompting_gpt import (
+    analyze_symptoms,
+    romanize_korean_names,
+    select_department_for_symptoms,
+    recommend_questions_to_doctor,
+    get_body_part_adjectives,
+    translate_text
+)
+from gpt_utils.department_mapping import get_department_translation
+
+from medicine_rag_utils.drug_rag_manager import DrugRAGManager
 import schedule
 import threading
 import mysql.connector
-from datetime import datetime
+from datetime import datetime, timedelta
 import configparser
+from rag_utils.rag_search import search_similar_diseases
+import pytz
+
+from app_core import (
+    get_db_connection,
+    initialize_recommenders,
+    retrain_models,
+    run_scheduler,
+    update_drug_data,
+    hospital_recommender,
+    pharmacy_recommender,
+    drug_rag_manager
+)
 
 app = FastAPI()
 
-
-#DB 연결 설정
-def get_db_connection():
-    config=configparser.ConfigParser()
-    config.read('keys.config')
-    
-    return mysql.connector.connect(
-        host=config['DB_INFO']['host'],
-        user=config['DB_INFO']['id'],
-        password=config['DB_INFO']['password'],
-        database=config['DB_INFO']['db']
-    )
-
-#추천 모델 인스턴스
-hospital_recommender=None
-pharmacy_recommender=None
-
-def initialize_recommenders():
-    #추천 모델 초기화
-    global hospital_recommender, pharmacy_recommender
-    db_connection=get_db_connection()
-    hospital_recommender=HospitalRecommender(
-        db_connection=db_connection
-    )
-    pharmacy_recommender=PharmacyRecommender(
-        db_connection=db_connection
-    )
-
-def retrain_models():
-    #모델 재훈련
-    global hospital_recommender, pharmacy_recommender
-    
-    #최근 7일간 선택한 사용자들의 member_id 가져오기
-    query="""
-    SELECT DISTINCT member_id 
-    FROM (
-        SELECT member_id, selected_at FROM selected_hp
-        UNION
-        SELECT member_id, selected_at FROM selected_ph
-    ) combined
-    WHERE selected_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
-    """
-    
-    try:
-        db_connection=get_db_connection()
-        member_ids=pd.read_sql(query, db_connection)['member_id'].tolist()
-        
-        for member_id in member_ids:
-            if hospital_recommender:
-                hospital_recommender.update_from_feedback(member_id)
-            if pharmacy_recommender:
-                pharmacy_recommender.update_from_feedback(member_id)
-                
-    except Exception as e:
-        print(f"모델 재훈련 중 오류 발생: {e}")
-    finally:
-        if 'db_connection' in locals():
-            db_connection.close()
-
-def run_scheduler():
-    #스케줄러 실행
-    schedule.every().day.at("03:00").do(retrain_models)  #매일 새벽 3시에 재훈련
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
-
 #스케줄러 시작
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
+    print("Starting up the application...")
+    
+    # 스케줄러 시작
     threading.Thread(target=run_scheduler, daemon=True).start()
+    
+    # 추천 모델 초기화
     initialize_recommenders()
+    
+    # 약품 RAG 시스템 초기화 (VectorDB 사전 구축)
+    print("Initializing drug RAG system...")
+    global drug_rag_manager
+    drug_rag_manager = DrugRAGManager()
+    
+    # 백그라운드에서 VectorDB 구축
+    def build_vectordb():
+        try:
+            success = drug_rag_manager.initialize_rag_system()
+            if success:
+                print("Drug RAG system initialized successfully")
+            else:
+                print("Failed to initialize drug RAG system")
+        except Exception as e:
+            print(f"Error initializing drug RAG system: {e}")
+    
+    # 백그라운드 스레드에서 VectorDB 구축
+    threading.Thread(target=build_vectordb, daemon=True).start()
     
 @app.post("/api/recommend/hospital")
 async def recommend_hospital(request: Request):
@@ -379,31 +359,312 @@ async def recommend_er(request: Request):
 
     return JSONResponse(content=filtered_df.to_dict(orient='records'))
 
-#증상, 언어 -> 병명, 질문&체크리스트
-@app.post("/api/pre_question/pre_question")
-async def process_symptoms(request: Request):
+#진료과 설명 딕셔너리 (샘플, 나머지는 빈 문자열)
+DEPARTMENT_DESCRIPTIONS = {
+    "가정의학과": "가정의학과는 전 연령대의 환자를 대상으로 예방, 진단, 치료, 건강관리를 담당합니다.",
+    "내과": "내과는 내분비, 소화기, 호흡기, 심혈관 등 다양한 내과적 질환을 진단하고 치료합니다.",
+    "정형외과": "정형외과는 뼈, 관절, 근육 등 근골격계 질환을 진단하고 치료합니다.",
+    # TODO: 나머지 진료과 설명 추가 필요
+    # ...
+}
+
+#신체 부위 -> 형용사 3개
+@app.post("/api/pre_question/expression")
+async def get_expression_adjectives(request: Request):
     try:
         data = await request.json()
-        print(f"Request data: {data}", flush=True)
+        print(f"Expression Request data: {data}", flush=True)
 
-        symptoms = data.get('symptoms', [])
+        body_part = data.get('body_part', '')
         language = data.get('language', '').upper()
 
-        if not symptoms or not language:
-            return JSONResponse(content={"error": "Both 'symptoms' and 'language' are required"}, status_code=400)
+        if not body_part or not language:
+            return JSONResponse(content={"error": "Both 'body_part' and 'language' are required"}, status_code=400)
 
-        #GPT 분석 처리
-        analysis = analyze_symptoms(symptoms, language)
+        # GPT를 통한 형용사 생성
+        adjectives = get_body_part_adjectives(body_part, language)
 
         final_response = {
-            "department": get_department_translation(analysis["department_ko"], language),
-            "possible_conditions": analysis["possible_conditions"],
-            "questions_to_doctor": analysis["questions_to_doctor"],
-            "symptom_checklist": analysis["symptom_checklist"]
+            "adjectives": adjectives
         }
 
         print("final_response:", final_response, flush=True)
         return JSONResponse(content=final_response, status_code=200)
 
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+#증상 -> 약품 추천 및 약사 질문
+@app.post("/api/pre_question/1")
+async def recommend_drug_for_symptom(request: Request):
+    try:
+        data = await request.json()
+        print(f"Drug recommendation request data: {data}", flush=True)
+
+        symptom = data.get('sign', '')
+        language = data.get('language', 'ko').lower()
+        patient_info = data.get('patient_info', {})
+
+        if not symptom:
+            return JSONResponse(content={"error": "Symptom is required"}, status_code=400)
+
+        # RAG 시스템이 준비되지 않은 경우
+        if not drug_rag_manager or not drug_rag_manager.is_ready():
+            if drug_rag_manager and drug_rag_manager.is_initializing:
+                return JSONResponse(
+                    content={
+                        "error": "Drug recommendation system is still initializing. Please try again in a few minutes.",
+                        "status": "initializing"
+                    }, 
+                    status_code=503
+                )
+            else:
+                return JSONResponse(
+                    content={
+                        "error": "Drug recommendation system is not available.",
+                        "status": "unavailable"
+                    }, 
+                    status_code=503
+                )
+
+        # RAG 시스템을 통한 약품 추천 (환자 정보 포함)
+        result = drug_rag_manager.get_recommendation(symptom, language, patient_info)
+        
+        if not result:
+            return JSONResponse(content={"error": "Failed to get drug recommendation"}, status_code=500)
+
+        final_response = {
+            "drug_name": result["drug_name"],
+            "drug_purpose": result["drug_purpose"],
+            "drug_image_url": result["drug_image_url"],
+            "pharmacist_question1": result["pharmacist_question1"],
+            "pharmacist_question2": result["pharmacist_question2"],
+            "pharmacist_question3": result.get("pharmacist_question3", ""),
+            "warning_message": result["warning_message"]
+        }
+
+        print("Drug recommendation response:", final_response, flush=True)
+        return JSONResponse(content=final_response, status_code=200)
+
+    except Exception as e:
+        print(f"Error in drug recommendation: {e}", flush=True)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+#RAG 시스템 상태 확인
+@app.get("/api/drug-rag/status")
+async def get_drug_rag_status():
+    try:
+        global drug_rag_manager
+        if not drug_rag_manager:
+            return JSONResponse(content={"error": "Drug RAG system not initialized"}, status_code=500)
+        
+        status = drug_rag_manager.get_system_status()
+        
+        # 추가 정보
+        status.update({
+            "system_ready": drug_rag_manager.is_ready()
+        })
+        
+        return JSONResponse(content=status, status_code=200)
+        
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+#RAG 시스템 재구축
+@app.post("/api/drug-rag/rebuild")
+async def rebuild_drug_rag():
+    try:
+        global drug_rag_manager
+        if not drug_rag_manager:
+            drug_rag_manager = DrugRAGManager()
+        
+        # 백그라운드에서 재구축
+        def rebuild_in_background():
+            try:
+                success = drug_rag_manager.initialize_rag_system(force_rebuild=True)
+                if success:
+                    print("Drug RAG system rebuilt successfully")
+                else:
+                    print("Failed to rebuild drug RAG system")
+            except Exception as e:
+                print(f"Error rebuilding drug RAG system: {e}")
+        
+        threading.Thread(target=rebuild_in_background, daemon=True).start()
+        
+        return JSONResponse(
+            content={
+                "message": "Drug RAG system rebuild started in background",
+                "status": "rebuilding"
+            }, 
+            status_code=202)
+            
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/pre_question/2")
+async def pre_question_2(request: Request):
+    try:
+        data = await request.json()
+        patientinfo = data.get('patientinfo', {})
+        language = patientinfo.get('language', '').upper()
+        bodypart = data.get('bodypart', '')
+        selectedSign = data.get('selectedSign', '')
+        symptom_info = data.get('symptom', {})
+        intensity = symptom_info.get('intensity', '')
+        startDate = symptom_info.get('startDate', '')
+        durationValue = symptom_info.get('durationValue', '')
+        durationUnit = symptom_info.get('durationUnit', '')
+        state = symptom_info.get('state', '')
+        additional = symptom_info.get('additional', '')
+
+        symptoms_for_llm = {
+            "bodypart": bodypart,
+            "selectedSign": selectedSign,
+            "intensity": intensity,
+            "startDate": startDate,
+            "duration": f"{durationValue} {durationUnit}",
+            "state": state,
+            "additional": additional
+        }
+
+        # 1. 진료과 선정
+        department_ko = select_department_for_symptoms(symptoms_for_llm)
+        # 2. 진료과 설명
+        department_description = DEPARTMENT_DESCRIPTIONS.get(department_ko, "")
+        # 3. 진료과 필드 (언어별)
+        if language == "KO":
+            department_field = department_ko
+        else:
+            romanized = romanize_korean_names([department_ko]).get(department_ko, "")
+            translation = get_department_translation(department_ko, language).get(language, "")
+            department_field = f"{department_ko} ({romanized}, {translation})"
+        # 4. 의사 질문 추천
+        questions_ko = recommend_questions_to_doctor(symptoms_for_llm)
+        questions_to_doctor = []
+        for q_ko in questions_ko:
+            if language == "KO":
+                questions_to_doctor.append(q_ko)
+            else:
+                q_trans = translate_text(q_ko, target_language=language.lower())
+                questions_to_doctor.append(f"{q_ko} ({q_trans})")
+        # 5. warning_message
+        warning_ko = "해당 내용은 정보 제공의 목적으로 구현되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
+        if language == "KO":
+            warning_message = warning_ko
+        else:
+            warning_message = translate_text(warning_ko, target_language=language.lower())
+        return JSONResponse(content={
+            "department": department_field,
+            "department_description": department_description,
+            "questions_to_doctor": questions_to_doctor,
+            "warning_message": warning_message
+        })
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+#증상, 언어 -> 병명, 질문&체크리스트
+@app.post("/api/pre_question/3")
+async def process_symptoms(request: Request):
+    try:
+        data = await request.json()
+        print(f"Request data: {data}", flush=True)
+
+        # 1. 파라미터 파싱
+        patientinfo = data.get('patientinfo', {})
+        language = patientinfo.get('language', '').upper()
+        bodypart = data.get('bodypart', '')
+        selectedSign = data.get('selectedSign', '')
+        symptom_info = data.get('symptom', {})
+        intensity = symptom_info.get('intensity', '')
+        startDate = symptom_info.get('startDate', '')
+        durationValue = symptom_info.get('durationValue', '')
+        durationUnit = symptom_info.get('durationUnit', '')
+        state = symptom_info.get('state', '')
+        additional = symptom_info.get('additional', '')
+
+        # 증상 요약 텍스트 생성 (영어로)
+        symptom_text_en = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}\nDuration: {durationValue} {durationUnit}\nState: {state}\nAdditional: {additional}"
+
+        # analyze_symptoms에 넘길 증상 정보 (영어)
+        symptoms_for_llm = {
+            "bodypart": bodypart,
+            "selectedSign": selectedSign,
+            "intensity": intensity,
+            "startDate": startDate,
+            "duration": f"{durationValue} {durationUnit}",
+            "state": state,
+            "additional": additional
+        }
+
+        # 2. LLM 분석
+        analysis = analyze_symptoms(symptoms_for_llm, language, exclude_possible_conditions=True)
+
+        # 3. 한국 기준 날짜/시간
+        now_kst = datetime.utcnow() + timedelta(hours=9)
+        now_kst_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
+        # 4. 증상 관련 입력 요약(최대 300자, 사용자 언어)
+        # LLM을 활용해 증상 요약 생성
+        symptom_input_text = f"신체 부위: {bodypart}\n증상 설명: {selectedSign}\n강도: {intensity}\n시작일: {startDate}\n지속 기간: {durationValue} {durationUnit}\n상태: {state}\n추가 설명: {additional}"
+        symptom_summary_ko = translate_text(
+            f"아래 환자 증상 정보를 300자 이내로 요약해줘. 반드시 한국어로만 답변해.\n{symptom_input_text}",
+            target_language="ko"
+        )
+        if language != "KO":
+            symptom_summary_trans = translate_text(symptom_summary_ko, target_language=language.lower())
+            symptom_summary = f"{symptom_summary_ko} ({symptom_summary_trans})"
+        else:
+            symptom_summary = symptom_summary_ko
+
+        # 5. request+response 요약(최대 100자, LLM 활용)
+        # LLM을 활용해 전체 요약 생성
+        summary_input = f"환자 증상: {symptom_input_text}\n진료과: {analysis['department_ko']}\n질문: {questions_to_doctor_trans}"
+        summary_ko = translate_text(
+            f"아래 내용을 100자 이내로 요약해줘. 반드시 한국어로만 답변해.\n{summary_input}",
+            target_language="ko"
+        )
+        if language != "KO":
+            summary_trans = translate_text(summary_ko, target_language=language.lower())
+            summary_text = f"{summary_ko} ({summary_trans})"
+        else:
+            summary_text = summary_ko
+
+        # 6. 진료과 번역: 한국어가 아니면 '한국어(자국어)' 형태
+        department_ko = analysis["department_ko"]
+        department_description = DEPARTMENT_DESCRIPTIONS.get(department_ko, "")
+        if language == "KO":
+            department_field = department_ko
+        else:
+            romanized = romanize_korean_names([department_ko]).get(department_ko, "")
+            english = get_department_translation(department_ko, "EN").get("EN", "")
+            department_field = f"{department_ko} ({romanized}, {english})"
+
+        # questions_to_doctor 변환
+        questions_to_doctor_ko = [q.get("KO", "") for q in analysis["questions_to_doctor"]]
+        questions_to_doctor_trans = []
+        for q_ko in questions_to_doctor_ko:
+            if language == "KO":
+                questions_to_doctor_trans.append(q_ko)
+            else:
+                q_trans = translate_text(q_ko, target_language=language.lower())
+                questions_to_doctor_trans.append(f"{q_ko} ({q_trans})")
+
+        # warning_message 생성
+        warning_ko = "해당 내용은 정보 제공의 목적으로 구현되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
+        if language == "KO":
+            warning_message = warning_ko
+        else:
+            warning_message = translate_text(warning_ko, target_language=language.lower())
+
+        final_response = {
+            "created_at_kst": now_kst_str,
+            "summary": summary_text,
+            "department": department_field,
+            "department_description": department_description,
+            "symptom_summary": symptom_summary,
+            "questions_to_doctor": questions_to_doctor_trans,
+            "warning_message": warning_message
+        }
+        return JSONResponse(content=final_response)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
