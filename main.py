@@ -558,7 +558,7 @@ async def pre_question_2(request: Request):
                 q_trans = translate_text(q_ko, target_language=language.lower())
                 questions_to_doctor.append(f"{q_ko} ({q_trans})")
         # 5. warning_message
-        warning_ko = "해당 내용은 정보 제공의 목적으로 구현되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
+        warning_ko = "해당 내용은 참고용으로 제공되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
         if language == "KO":
             warning_message = warning_ko
         else:
@@ -648,8 +648,9 @@ async def process_symptoms(request: Request):
             romanized = romanize_korean_names([department_ko]).get(department_ko, "")
             english_translation = DEPARTMENT_TRANSLATIONS.get(department_ko, {}).get("EN", "")
             department_field = f"{department_ko} ({romanized}, {english_translation})"
-
-        # questions_to_doctor 변환 (새로운 구조)
+        
+        # 7. 의사에게 할 질문 추천
+        questions_to_doctor_list = recommend_questions_to_doctor(symptoms_for_llm)
         questions_to_doctor_trans = {}
         for idx, question_ko in enumerate(questions_to_doctor_list):
             if language == "KO":
@@ -659,7 +660,7 @@ async def process_symptoms(request: Request):
                 questions_to_doctor_trans[f"question {idx+1}"] = f"{question_ko} ({q_trans})"
 
         # warning_message 생성
-        warning_ko = "해당 내용은 정보 제공의 목적으로 구현되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
+        warning_ko = "해당 내용은 참고용으로 제공되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
         if language == "KO":
             warning_message = warning_ko
         else:
