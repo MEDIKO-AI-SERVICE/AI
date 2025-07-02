@@ -1,4 +1,13 @@
 keys.config
 Dockerfile
 testing.csv
-training.csv
+trainings.csv
+drug_data.csv
+useless
+drug_embeddings.pkl
+__pycache__
+drug_data_meta.pkl
+drug_data_index.index
+drug_meta.pkl
+combined_meta.json
+combined.index

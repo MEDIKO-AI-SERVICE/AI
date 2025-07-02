@@ -27,9 +27,11 @@ from gpt_utils.prompting_gpt import (
     select_department_for_symptoms,
     recommend_questions_to_doctor,
     get_body_part_adjectives,
-    translate_text
+    translate_text,
+    summarize_symptom_keywords,
+    summarize_symptom_input
 )
-from gpt_utils.department_mapping import get_department_translation
+from gpt_utils.department_mapping import DEPARTMENT_TRANSLATIONS
 
 from medicine_rag_utils.drug_rag_manager import DrugRAGManager
 import schedule
@@ -61,17 +63,22 @@ async def startup_event():
     # 스케줄러 시작
     threading.Thread(target=run_scheduler, daemon=True).start()
     
-    # 추천 모델 초기화
-    initialize_recommenders()
-    
-    # 약품 RAG 시스템 초기화 (VectorDB 사전 구축)
-    print("Initializing drug RAG system...")
-    global drug_rag_manager
-    drug_rag_manager = DrugRAGManager()
-    
-    # 백그라운드에서 VectorDB 구축
-    def build_vectordb():
+    # 추천 모델 초기화 (비동기로)
+    def init_recommenders():
         try:
+            initialize_recommenders()
+            print("Recommenders initialized successfully")
+        except Exception as e:
+            print(f"Error initializing recommenders: {e}")
+    
+    threading.Thread(target=init_recommenders, daemon=True).start()
+    
+    # 약품 RAG 시스템 초기화 (완전히 백그라운드로)
+    def init_drug_rag():
+        try:
+            print("Initializing drug RAG system in background...")
+            global drug_rag_manager
+            drug_rag_manager = DrugRAGManager()
             success = drug_rag_manager.initialize_rag_system()
             if success:
                 print("Drug RAG system initialized successfully")
@@ -80,8 +87,10 @@ async def startup_event():
         except Exception as e:
             print(f"Error initializing drug RAG system: {e}")
     
-    # 백그라운드 스레드에서 VectorDB 구축
-    threading.Thread(target=build_vectordb, daemon=True).start()
+    # 백그라운드 스레드에서 RAG 시스템 초기화
+    threading.Thread(target=init_drug_rag, daemon=True).start()
+    
+    print("Application startup completed - services will be available as they initialize")
     
 @app.post("/api/recommend/hospital")
 async def recommend_hospital(request: Request):
@@ -359,14 +368,6 @@ async def recommend_er(request: Request):
 
     return JSONResponse(content=filtered_df.to_dict(orient='records'))
 
-#진료과 설명 딕셔너리 (샘플, 나머지는 빈 문자열)
-DEPARTMENT_DESCRIPTIONS = {
-    "가정의학과": "가정의학과는 전 연령대의 환자를 대상으로 예방, 진단, 치료, 건강관리를 담당합니다.",
-    "내과": "내과는 내분비, 소화기, 호흡기, 심혈관 등 다양한 내과적 질환을 진단하고 치료합니다.",
-    "정형외과": "정형외과는 뼈, 관절, 근육 등 근골격계 질환을 진단하고 치료합니다.",
-    # TODO: 나머지 진료과 설명 추가 필요
-    # ...
-}
 
 #신체 부위 -> 형용사 3개
 @app.post("/api/pre_question/expression")
@@ -393,6 +394,19 @@ async def get_expression_adjectives(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+
+import math
+
+def clean_nan(obj):
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: clean_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [clean_nan(v) for v in obj]
+    return obj
 
 #증상 -> 약품 추천 및 약사 질문
 @app.post("/api/pre_question/1")
@@ -444,6 +458,7 @@ async def recommend_drug_for_symptom(request: Request):
         }
 
         print("Drug recommendation response:", final_response, flush=True)
+        final_response = clean_nan(final_response)
         return JSONResponse(content=final_response, status_code=200)
 
     except Exception as e:
@@ -470,44 +485,37 @@ async def get_drug_rag_status():
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-#RAG 시스템 재구축
-@app.post("/api/drug-rag/rebuild")
-async def rebuild_drug_rag():
-    try:
-        global drug_rag_manager
-        if not drug_rag_manager:
-            drug_rag_manager = DrugRAGManager()
-        
-        # 백그라운드에서 재구축
-        def rebuild_in_background():
-            try:
-                success = drug_rag_manager.initialize_rag_system(force_rebuild=True)
-                if success:
-                    print("Drug RAG system rebuilt successfully")
-                else:
-                    print("Failed to rebuild drug RAG system")
-            except Exception as e:
-                print(f"Error rebuilding drug RAG system: {e}")
-        
-        threading.Thread(target=rebuild_in_background, daemon=True).start()
-        
-        return JSONResponse(
-            content={
-                "message": "Drug RAG system rebuild started in background",
-                "status": "rebuilding"
-            }, 
-            status_code=202)
-            
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+#진료과 설명 딕셔너리
+DEPARTMENT_DESCRIPTIONS = {
+    "가정의학과": "이 진료과는 전 연령대의 환자를 대상으로 예방, 진단, 치료, 건강관리를 담당합니다.",
+    "내과": "이 진료과는 내분비, 소화기, 호흡기, 심혈관 등 내부 장기에서 발생한 질환을 비수술적 방식으로 치료합니다.",
+    "정형외과": "이 진료과는 뼈, 관절, 근육 등 근골격계 질환을 진단하고 치료합니다.",
+    "한방과":"이 진료과는 한국 전통 치료법을 중심으로 질환을 처치 및 예방합니다.",
+    "피부과":"이 진료과는 피부와 피부에 부속된 기관의 질병을 치료합니다.",
+    "치의과":"이 진료과는 치아와 치아에 부석된 기관(치주조직, 구강구조물, 턱뼈, 턱관절, 얼굴)의 질환을 치료합니다.",
+    "정신건강의학과":"이 진료과는 면담과 검사를 통해 정신적 질병(조현병, 양극성 장애, 우울 장애, 강박 장애 등)을 치료합니다.",
+    "재활의학과":"이 진료과는 각종 질병 및 사고로 인하여 장애가 생긴 환자의 재활을 목적으로 합니다.",
+    "이비인후과":"이 진료과는 귀, 코와 관련된 질환 및 두경부 외과 질환을 치료합니다.",
+    "외과":"이 진료과는 몸 외부의 상처나 내장 기관의 질병을 수술이나 그와 비슷한 방법으로 치료합니다.",
+    "예방의학과":"이 진료과는 인구집단이 가진 보건문제 예방과 건강 증진을 목적으로 합니다.",
+    "영상의학과":"이 진료과는 다양한 영상장비를 이용하여(X-선검사, 초음파검사, CT검사, MRI검사, 골밀도검사, 유방촬영) 영상을 획득하고 영상 자료를 토대로 질병을 진단합니다.",
+    "안과":"이 진료과는 눈과 관련된 질환을 진단 및 치료합니다.",
+    "심장혈관흉부외과":"이 진료과는 흉부에 위치한 심장, 폐, 식도, 대동맥, 종격동, 횡격막, 기관 등의 질환에 대한 수술적으로 치료합니다.",
+    "신경외과":"이 진료과는 뇌와 척수를 포함한 중추신경계와 말초신경계에서 발생하는 질병을 진단하고 수술적인 방법으로 치료합니다.",
+    "신경과":"이 진료과는 뇌와 척수를 포함한 중추신경계와 말초신경계에서 발생하는 질병을 진단하고 비수술적인 방법으로 치료합니다.",
+    "소아청소년과":"이 진료과는 영아기부터 청소년기까지의 환자를 중심으로 질환을 진료 및 치료합니다.",
+    "성형외과":"이 진료과는 재건 수술과 미용 수술을 중심으로 인체 외형 변화를 제공합니다.",
+    "산부인과":"이 진료과는 모든 연령의 여성을 대상으로 임신, 출산, 여성 생식 기관 질병을 진료 및 치료합니다.",
+    "비뇨의학과":"이 진료과는 콩팥(신장), 요관, 방광, 요도 등 요로계 장기들과 음경, 고환, 정관 및 전립선 등 남성생식과 관련된 장기 관련 질환을 진단하고 주로 수술적인 방법으로 치료합니다.",
+    "마취통증의학과":"이 진료과는 각종 수술과 진정 관리를 받는 환자의 안전을 책임지며, 통증 클리닉을 통해 통증 환자들에 대한 진료를 담당합니다."
+}
 
 
 @app.post("/api/pre_question/2")
 async def pre_question_2(request: Request):
     try:
         data = await request.json()
-        patientinfo = data.get('patientinfo', {})
-        language = patientinfo.get('language', '').upper()
+        language = data.get('language', 'KO').upper()
         bodypart = data.get('bodypart', '')
         selectedSign = data.get('selectedSign', '')
         symptom_info = data.get('symptom', {})
@@ -537,8 +545,9 @@ async def pre_question_2(request: Request):
             department_field = department_ko
         else:
             romanized = romanize_korean_names([department_ko]).get(department_ko, "")
-            translation = get_department_translation(department_ko, language).get(language, "")
-            department_field = f"{department_ko} ({romanized}, {translation})"
+            # 딕셔너리에서 직접 영어 번역 가져오기
+            english_translation = DEPARTMENT_TRANSLATIONS.get(department_ko, {}).get("EN", "")
+            department_field = f"{department_ko} ({romanized}, {english_translation})"
         # 4. 의사 질문 추천
         questions_ko = recommend_questions_to_doctor(symptoms_for_llm)
         questions_to_doctor = []
@@ -562,6 +571,10 @@ async def pre_question_2(request: Request):
         })
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+
+
 #증상, 언어 -> 병명, 질문&체크리스트
 @app.post("/api/pre_question/3")
 async def process_symptoms(request: Request):
@@ -570,8 +583,8 @@ async def process_symptoms(request: Request):
         print(f"Request data: {data}", flush=True)
 
         # 1. 파라미터 파싱
+        language = data.get('language', 'KO').upper()
         patientinfo = data.get('patientinfo', {})
-        language = patientinfo.get('language', '').upper()
         bodypart = data.get('bodypart', '')
         selectedSign = data.get('selectedSign', '')
         symptom_info = data.get('symptom', {})
@@ -597,37 +610,34 @@ async def process_symptoms(request: Request):
         }
 
         # 2. LLM 분석
-        analysis = analyze_symptoms(symptoms_for_llm, language, exclude_possible_conditions=True)
+        analysis = analyze_symptoms(symptoms_for_llm, patientinfo, exclude_possible_conditions=True)
 
         # 3. 한국 기준 날짜/시간
         now_kst = datetime.utcnow() + timedelta(hours=9)
         now_kst_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
 
         # 4. 증상 관련 입력 요약(최대 300자, 사용자 언어)
-        # LLM을 활용해 증상 요약 생성
         symptom_input_text = f"신체 부위: {bodypart}\n증상 설명: {selectedSign}\n강도: {intensity}\n시작일: {startDate}\n지속 기간: {durationValue} {durationUnit}\n상태: {state}\n추가 설명: {additional}"
-        symptom_summary_ko = translate_text(
-            f"아래 환자 증상 정보를 300자 이내로 요약해줘. 반드시 한국어로만 답변해.\n{symptom_input_text}",
-            target_language="ko"
-        )
+        symptom_summary_ko = summarize_symptom_input(symptom_input_text, language="KO")
         if language != "KO":
-            symptom_summary_trans = translate_text(symptom_summary_ko, target_language=language.lower())
+            symptom_summary_trans = summarize_symptom_input(symptom_input_text, language=language)
             symptom_summary = f"{symptom_summary_ko} ({symptom_summary_trans})"
         else:
             symptom_summary = symptom_summary_ko
 
-        # 5. request+response 요약(최대 100자, LLM 활용)
-        # LLM을 활용해 전체 요약 생성
-        summary_input = f"환자 증상: {symptom_input_text}\n진료과: {analysis['department_ko']}\n질문: {questions_to_doctor_trans}"
-        summary_ko = translate_text(
-            f"아래 내용을 100자 이내로 요약해줘. 반드시 한국어로만 답변해.\n{summary_input}",
-            target_language="ko"
-        )
-        if language != "KO":
-            summary_trans = translate_text(summary_ko, target_language=language.lower())
-            summary_text = f"{summary_ko} ({summary_trans})"
-        else:
-            summary_text = summary_ko
+        # 5. 증상 키워드 기반 50자 이내 한 줄 요약 생성
+        summary_keywords = []
+        if bodypart:
+            summary_keywords.append(str(bodypart))
+        if selectedSign:
+            summary_keywords.append(str(selectedSign))
+        if durationValue or durationUnit:
+            summary_keywords.append(f"{durationValue}{durationUnit}".strip())
+        if state:
+            summary_keywords.append(str(state))
+        if additional:
+            summary_keywords.append(str(additional))
+        summary_text = summarize_symptom_keywords(summary_keywords, language)
 
         # 6. 진료과 번역: 한국어가 아니면 '한국어(자국어)' 형태
         department_ko = analysis["department_ko"]
@@ -636,18 +646,17 @@ async def process_symptoms(request: Request):
             department_field = department_ko
         else:
             romanized = romanize_korean_names([department_ko]).get(department_ko, "")
-            english = get_department_translation(department_ko, "EN").get("EN", "")
-            department_field = f"{department_ko} ({romanized}, {english})"
+            english_translation = DEPARTMENT_TRANSLATIONS.get(department_ko, {}).get("EN", "")
+            department_field = f"{department_ko} ({romanized}, {english_translation})"
 
-        # questions_to_doctor 변환
-        questions_to_doctor_ko = [q.get("KO", "") for q in analysis["questions_to_doctor"]]
-        questions_to_doctor_trans = []
-        for q_ko in questions_to_doctor_ko:
+        # questions_to_doctor 변환 (새로운 구조)
+        questions_to_doctor_trans = {}
+        for idx, question_ko in enumerate(questions_to_doctor_list):
             if language == "KO":
-                questions_to_doctor_trans.append(q_ko)
+                questions_to_doctor_trans[f"question {idx+1}"] = question_ko
             else:
-                q_trans = translate_text(q_ko, target_language=language.lower())
-                questions_to_doctor_trans.append(f"{q_ko} ({q_trans})")
+                q_trans = translate_text(question_ko, target_language=language.lower())
+                questions_to_doctor_trans[f"question {idx+1}"] = f"{question_ko} ({q_trans})"
 
         # warning_message 생성
         warning_ko = "해당 내용은 정보 제공의 목적으로 구현되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."

@@ -1,9 +1,9 @@
 import openai
 import numpy as np
+import faiss
 from typing import List, Dict, Any
-from .vector_faiss import get_embedding
-from gpt_utils.prompting_gpt_for_profile import translate_text
-from gpt_utils.prompting_gpt import romanize_korean_names
+from rag_utils.rag_search import get_embedding
+from gpt_utils.prompting_gpt import translate_text, romanize_korean_names
 import re
 
 def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: str, language: str = "ko", patient_info: Dict = None, top_k: int = 5) -> Dict[str, Any]:
@@ -25,9 +25,14 @@ def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: 
     # 1단계: 증상을 한국어로 변환 (RAG 검색을 위해)
     korean_symptom = convert_symptom_to_korean(symptom, language)
     
-    # 2단계: 한국어 증상으로 RAG 검색
-    query_emb = get_embedding(korean_symptom, openai_api_key)
-    D, I = faiss_index.search(np.array([query_emb]), top_k)
+    # 2단계: 환자 정보를 고려한 검색 범위 확장
+    # 환자 정보가 있으면 더 많은 후보를 검색하여 필터링
+    search_k = top_k * 3 if patient_info else top_k
+    
+    # 한국어 증상으로 RAG 검색
+    query_emb = get_embedding(korean_symptom, openai_api_key).reshape(1, -1)
+    # FAISS 검색 (Python 바인딩)
+    D, I = faiss_index.search(query_emb, search_k)
     
     # 후보 약품들 선택
     candidates = [meta[i] for i in I[0]]
@@ -154,14 +159,15 @@ def analyze_drug_context(drug: Dict, patient_info: Dict, symptom: str) -> tuple[
     "reasoning": "평가 근거"
 }}"""
 
-        response = openai.ChatCompletion.create(
+        client = openai.OpenAI(api_key=openai.api_key)
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3
         )
         
         import json
-        result = json.loads(response['choices'][0]['message']['content'])
+        result = json.loads(response.choices[0].message.content)
         
         return result.get('score', 0), result.get('risks', [])
         
@@ -170,35 +176,72 @@ def analyze_drug_context(drug: Dict, patient_info: Dict, symptom: str) -> tuple[
         return 0, []
 
 def analyze_drug_keywords(drug: Dict, patient_info: Dict) -> tuple[int, List[str]]:
-    """기존 키워드 기반 분석 (백업용)"""
+    """키워드 기반 약품 분석 (환자 특성 고려)"""
     score = 0
     warnings = []
     
     # 성별 고려
     if patient_info.get('gender'):
         gender = patient_info['gender'].lower()
-        drug_text = f"{drug.get('itemName', '')} {drug.get('efcyQesitm', '')}".lower()
+        drug_name = drug.get('itemName', '').lower()
+        drug_purpose = drug.get('efcyQesitm', '').lower()
+        drug_text = f"{drug_name} {drug_purpose}"
         
-        if gender in ['female', '여성', '여자']:
-            if any(word in drug_text for word in ['여성', '여자', '생리', '월경', '임신', '수유']):
-                score += 5
-        elif gender in ['male', '남성', '남자']:
-            if any(word in drug_text for word in ['남성', '남자', '전립선']):
-                score += 5
+        if gender in ['female', '여성', '여자', '女', '女姓', 'đàn bà', 'nữ giới']:
+            # 여성 전용 약품 키워드
+            female_keywords = [
+                '여성', '여자', '생리', '월경', '임신', '수유', '그날엔', '우먼', 'woman',
+                '여성용', '여자용', '생리통', '월경통', '생리불순', '월경불순',
+                '여성호르몬', '에스트로겐', '프로게스테론', '피임', '갱년기'
+            ]
+            if any(keyword in drug_text for keyword in female_keywords):
+                score += 8
+            # 남성 전용 약품은 제외
+            male_keywords = ['남성', '남자', '전립선', '남성용', '남자용']
+            if any(keyword in drug_text for keyword in male_keywords):
+                score -= 10
+                warnings.append("남성 전용 약품")
+                
+        elif gender in ['male', '남성', '남자', '男', '男姓', 'người đàn ông', 'nam giới']:
+            # 남성 전용 약품 키워드
+            male_keywords = [
+                '남성', '남자', '전립선', '남성용', '남자용', '발기', '정력',
+                '남성호르몬', '테스토스테론', '탈모', '남성갱년기'
+            ]
+            if any(keyword in drug_text for keyword in male_keywords):
+                score += 8
+            # 여성 전용 약품은 제외
+            female_keywords = ['여성', '여자', '생리', '월경', '임신', '수유', '그날엔', '우먼']
+            if any(keyword in drug_text for keyword in female_keywords):
+                score -= 10
+                warnings.append("여성 전용 약품")
     
     # 나이 고려
     if patient_info.get('age'):
         age = patient_info['age']
-        drug_text = f"{drug.get('itemName', '')} {drug.get('useMethodQesitm', '')}".lower()
+        drug_name = drug.get('itemName', '').lower()
+        drug_method = drug.get('useMethodQesitm', '').lower()
+        drug_text = f"{drug_name} {drug_method}"
         
         if age < 12:  # 어린이
-            if any(word in drug_text for word in ['시럽', '츄어블', '어린이', '소아']):
+            child_keywords = ['시럽', '츄어블', '어린이', '소아', '아동', '유아', '베이비', 'baby', '유소년', '초등학생', '유치원생']
+            if any(keyword in drug_text for keyword in child_keywords):
+                score += 5
+            # 성인 전용 약품은 제외
+            adult_keywords = ['성인', '어른', '성인용', '어른용']
+            if any(keyword in drug_text for keyword in adult_keywords):
+                score -= 8
+                warnings.append("성인 전용 약품")
+                
+        elif age < 18:  # 청소년
+            teen_keywords = ['청소년', '학생', '10대', 'teen', '중학생', '고등학생', '중학교', '고등학교', '유소년']
+            if any(keyword in drug_text for keyword in teen_keywords):
                 score += 3
-            elif '알약' in drug_text and '어린이' not in drug_text:
-                score -= 2
+                
         elif age > 65:  # 고령자
-            if any(word in drug_text for word in ['고령자', '노인']):
-                score += 2
+            elderly_keywords = ['고령자', '노인', '시니어', 'elderly', 'senior']
+            if any(keyword in drug_text for keyword in elderly_keywords):
+                score += 5
     
     # 키/몸무게 고려
     if patient_info.get('height') and patient_info.get('weight'):
@@ -364,22 +407,16 @@ def convert_symptom_to_korean(symptom: str, source_language: str) -> str:
     if source_language.lower() == "ko":
         return symptom
     
-    openai.api_key = openai.api_key
+    client = openai.OpenAI(api_key=openai.api_key)
     
-    prompt = f"""You are a medical translator. Convert the following symptom to Korean medical terminology.
-
-Source language: {source_language}
-Symptom: {symptom}
-
-Return only the Korean translation. Do not add any explanations or additional text.
-Focus on medical accuracy and use proper Korean medical terms."""
+    prompt = f"""You are a medical translator. Convert the following symptom to Korean medical terminology. Source language: {source_language}, Symptom: {symptom}. Return only the Korean translation. Do not add any explanations or additional text. Focus on medical accuracy and use proper Korean medical terms."""
     
     try:
-    response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}]
     )
-        return response['choices'][0]['message']['content'].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error converting symptom to Korean: {e}")
         return symptom  # 실패 시 원본 반환

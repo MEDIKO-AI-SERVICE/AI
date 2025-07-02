@@ -7,11 +7,14 @@ import pandas as pd
 import schedule
 import threading
 import time
+import os
 from datetime import datetime, timedelta
 
 def get_db_connection():
     config = configparser.ConfigParser()
-    config.read('keys.config')
+    # keys.config 파일 경로 설정 (프로젝트 루트 기준)
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keys.config')
+    config.read(config_path)
     return mysql.connector.connect(
         host=config['DB_INFO']['host'],
         user=config['DB_INFO']['id'],
