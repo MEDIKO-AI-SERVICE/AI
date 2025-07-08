@@ -5,7 +5,7 @@ import configparser
 import os
 from rag_utils.rag_search import search_similar_diseases
 
-# keys.config 파일 경로 설정 (프로젝트 루트 기준)
+#keys.config 파일 경로 설정 (프로젝트 루트 기준)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 config_path = os.path.join(project_root, 'keys.config')
@@ -13,14 +13,59 @@ config_path = os.path.join(project_root, 'keys.config')
 config=configparser.ConfigParser()
 config.read(config_path)
 openai.api_key=config['API_KEYS']['chatgpt_api_key']
+
+# 언어 정보 통합 딕셔너리
+LANGUAGES = {
+    "KO": {
+        "name": "한국어",
+        "adjectives": ["아파요", "부었어요", "따가워요"],
+        "prompt": "'{body_part}'에 대해 일반적으로 사용되는 증상 형용사 3개를 한국어로만 반환해주세요. 반드시 '해요체' 형태로 답변해주세요. 예시: '아파요', '부었어요', '뻣뻣해요', '저려요', '따가워요', '시큰거려요'와 같은 형식으로 답변해주세요. JSON 배열 형태로만 응답하세요.",
+    },
+    "EN": {
+        "name": "English",
+        "adjectives": ["hurts", "swollen", "tingling"],
+        "prompt": "Please return 3 common symptom adjectives for '{body_part}' in English only. Examples: 'hurts', 'swollen', 'tingling'. Respond only in JSON array format.",
+    },
+    "VI": {
+        "name": "Vietnamese",
+        "adjectives": ["đau", "sưng", "ngứa"],
+        "prompt": "Vui lòng trả về 3 tính từ triệu chứng phổ biến cho '{body_part}' bằng tiếng Việt. Ví dụ: 'đau', 'sưng', 'ngứa'. Chỉ trả lời dưới dạng mảng JSON.",
+    },
+    "ZH_CN": {
+        "name": "Chinese (Simplified)",
+        "adjectives": ["疼", "肿", "痒"],
+        "prompt": "请为'{body_part}'返回3个常见症状形容词，仅用中文。例如：'疼'、'肿'、'痒'。仅以JSON数组格式回复。",
+    },
+    "ZH_TW": {
+        "name": "Chinese (Traditional)",
+        "adjectives": ["疼", "腫", "癢"],
+        "prompt": "請為'{body_part}'返回3個常見症狀形容詞，僅用繁體中文。例如：'疼'、'腫'、'癢'。僅以JSON陣列格式回覆。",
+    },
+    "NE": {
+        "name": "Nepali",
+        "adjectives": ["दुख्छ", "सुन्निन्छ", "खुजली हुन्छ"],
+        "prompt": "कृपया '{body_part}' का लागि ३ सामान्य लक्षण विशेषणहरू नेपालीमा मात्र फर्काउनुहोस्। उदाहरण: 'दुख्छ', 'सुन्निन्छ', 'खुजली हुन्छ'। केवल JSON array मा जवाफ दिनुहोस्।",
+    },
+    "ID": {
+        "name": "Indonesian",
+        "adjectives": ["sakit", "bengkak", "gatal"],
+        "prompt": "Silakan kembalikan 3 kata sifat gejala umum untuk '{body_part}' hanya dalam bahasa Indonesia. Contoh: 'sakit', 'bengkak', 'gatal'. Jawab hanya dalam format array JSON.",
+    },
+    "TH": {
+        "name": "Thai",
+        "adjectives": ["ปวด", "บวม", "คัน"],
+        "prompt": "โปรดส่งคืนคำคุณศัพท์อาการทั่วไป 3 คำสำหรับ '{body_part}' เป็นภาษาไทยเท่านั้น ตัวอย่าง: 'ปวด', 'บวม', 'คัน' ตอบกลับเป็น JSON array เท่านั้น",
+    },
+}
+
 def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=False):
     import openai, json
     
-    # 입력 검증 (딕셔너리 구조)
+    #입력 검증 (딕셔너리 구조)
     if not symptoms or not isinstance(symptoms, dict):
         raise ValueError("증상 정보는 비어있지 않은 딕셔너리여야 합니다.")
 
-    # RAG 기반 유사 질병 검색 (Top-3)
+    #RAG 기반 유사 질병 검색 (Top-3)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
     rag_utils_dir = os.path.join(project_root, 'rag_utils')
@@ -34,7 +79,7 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
         } for item in similar_conditions
     ]
 
-    # 증상 설명 텍스트 생성 (영어)
+    #증상 설명 텍스트 생성 (영어)
     bodypart = symptoms.get("bodypart", "")
     selectedSign = symptoms.get("selectedSign", "")
     intensity = symptoms.get("intensity", "")
@@ -42,11 +87,15 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
     duration = symptoms.get("duration", "")
     state = symptoms.get("state", "")
     additional = symptoms.get("additional", "")
-    symptom_description = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}\nDuration: {duration}\nState: {state}"
+    symptom_description = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}"
+    if duration:
+        symptom_description += f"\nDuration: {duration}"
+    if state:
+        symptom_description += f"\nState: {state}"
     if additional:
         symptom_description += f"\nAdditional: {additional}"
 
-    # 환자 정보 텍스트 생성
+    #환자 정보 텍스트 생성
     patient_info_text = ""
     if patient_info:
         gender = patient_info.get("gender", "")
@@ -60,7 +109,7 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
 
     if not (bodypart or selectedSign or intensity or startDate or duration or state or additional):
         raise ValueError("유효한 증상 정보가 없습니다.")
-
+    
     prompt=(
         "You are a medical assistant. ALL your answers MUST be in Korean. (모든 답변은 반드시 한국어로 작성하세요.)\n\n"
         "Your task is to return the following fields in JSON format:\n\n"
@@ -171,22 +220,14 @@ def get_body_part_adjectives(body_part: str, language: str) -> list[str]:
     
     Args:
         body_part (str): 신체 부위 (예: '무릎', '머리', '배')
-        language (str): 사용자 언어 ('KO', 'EN', 'VI', 'ZH_CN', 'ZH_TW')
+        language (str): 사용자 언어 ('KO', 'EN', 'VI', 'ZH_CN', 'ZH_TW', 'NE', 'ID', 'TH')
     
     Returns:
         list[str]: 3개의 형용사 리스트
     """
     
-    # 언어별 프롬프트 템플릿
-    language_prompts = {
-        "KO": f"'{body_part}'에 대해 일반적으로 사용되는 증상 형용사 3개를 한국어로만 반환해주세요. 반드시 '해요체' 형태로 답변해주세요. 예시: '아파요', '부었어요', '뻣뻣해요', '저려요', '따가워요', '시큰거려요'와 같은 형식으로 답변해주세요. JSON 배열 형태로만 응답하세요.",
-        "EN": f"Please return 3 common symptom adjectives for '{body_part}' in English only. Examples: 'hurts', 'swollen', 'tingling'. Respond only in JSON array format.",
-        "VI": f"Vui lòng trả về 3 tính từ triệu chứng phổ biến cho '{body_part}' bằng tiếng Việt. Ví dụ: 'đau', 'sưng', 'ngứa'. Chỉ trả lời dưới dạng mảng JSON.",
-        "ZH_CN": f"请为'{body_part}'返回3个常见症状形容词，仅用中文。例如：'疼'、'肿'、'痒'。仅以JSON数组格式回复。",
-        "ZH_TW": f"請為'{body_part}'返回3個常見症狀形容詞，僅用繁體中文。例如：'疼'、'腫'、'癢'。僅以JSON陣列格式回覆。"
-    }
-    
-    prompt = language_prompts.get(language.upper(), language_prompts["EN"])
+    lang = LANGUAGES.get(language.upper(), LANGUAGES["EN"])
+    prompt = lang["prompt"].format(body_part=body_part)
     
     try:
         response = openai.chat.completions.create(
@@ -200,41 +241,22 @@ def get_body_part_adjectives(body_part: str, language: str) -> list[str]:
         
         result = response.choices[0].message.content.strip()
         
-        # JSON 파싱
+        #JSON 파싱
         import json
         adjectives = json.loads(result)
         
-        # 3개 형용사가 아닌 경우 처리
+        #3개 형용사가 아닌 경우 처리
         if not isinstance(adjectives, list) or len(adjectives) != 3:
-            # 기본 형용사 반환
-            default_adjectives = {
-                "KO": ["아파요", "부었어요", "따가워요"],
-                "EN": ["hurts", "swollen", "tingling"],
-                "VI": ["đau", "sưng", "ngứa"],
-                "ZH_CN": ["疼", "肿", "痒"],
-                "ZH_TW": ["疼", "腫", "癢"]
-            }
-            return default_adjectives.get(language.upper(), default_adjectives["EN"])
+            return lang["adjectives"]
         
         return adjectives
         
     except Exception as e:
         print(f"Error in get_body_part_adjectives: {e}")
-        # 에러 시 기본 형용사 반환
-        default_adjectives = {
-            "KO": ["아파요", "부었어요", "따가워요"],
-            "EN": ["hurts", "swollen", "tingling"],
-            "VI": ["đau", "sưng", "ngứa"],
-            "ZH_CN": ["疼", "肿", "痒"],
-            "ZH_TW": ["疼", "腫", "癢"]
-        }
-        return default_adjectives.get(language.upper(), default_adjectives["EN"])
+        return lang["adjectives"]
 
 def select_department_for_symptoms(symptoms: dict) -> str:
-    """
-    Given symptoms, use GPT to select the most relevant department (진료과) in Korean.
-    Returns the department name in Korean.
-    """
+
     import openai
     import json
     
@@ -248,10 +270,8 @@ def select_department_for_symptoms(symptoms: dict) -> str:
     selectedSign = symptoms.get("selectedSign", "")
     intensity = symptoms.get("intensity", "")
     startDate = symptoms.get("startDate", "")
-    duration = symptoms.get("duration", "")
-    state = symptoms.get("state", "")
     additional = symptoms.get("additional", "")
-    symptom_description = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}\nDuration: {duration}\nState: {state}"
+    symptom_description = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}"
     if additional:
         symptom_description += f"\nAdditional: {additional}"
     
@@ -270,9 +290,9 @@ def select_department_for_symptoms(symptoms: dict) -> str:
         temperature=0.2
     )
     department_ko = response.choices[0].message.content.strip()
-    # Only keep the department if it's in the list
+    #Only keep the department if it's in the list
     if department_ko not in department_list:
-        # fallback: just return 내과
+        #fallback: just return 내과
         return "내과"
     return department_ko
 
@@ -285,7 +305,7 @@ def recommend_questions_to_doctor(symptoms: dict) -> list:
     import openai
     import json
     
-    # 증상 정보 구성
+    #증상 정보 구성
     bodypart = symptoms.get("bodypart", "")
     selectedSign = symptoms.get("selectedSign", "")
     intensity = symptoms.get("intensity", "")
@@ -300,7 +320,11 @@ def recommend_questions_to_doctor(symptoms: dict) -> list:
         "증상이 더 심해지면 어떻게 해야 하나요?"
     ]
     
-    symptom_description = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}\nDuration: {duration}\nState: {state}"
+    symptom_description = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}"
+    if duration:
+        symptom_description += f"\nDuration: {duration}"
+    if state:
+        symptom_description += f"\nState: {state}"
     if additional:
         symptom_description += f"\nAdditional: {additional}"
     
@@ -335,9 +359,9 @@ def recommend_questions_to_doctor(symptoms: dict) -> list:
         result = response.choices[0].message.content.strip()
         questions = json.loads(result)
         
-        # 4개 질문이 아닌 경우 처리
+        #4개 질문이 아닌 경우 처리
         if not isinstance(questions, list) or len(questions) != 4:
-            # 기본 질문으로 fallback
+            #기본 질문으로 fallback
             print(f"Error in recommend_questions_to_doctor: {e}")
             return fallback_questions
         
@@ -348,20 +372,9 @@ def recommend_questions_to_doctor(symptoms: dict) -> list:
         return fallback_questions
 
 def translate_text(text, target_language="en"):
-    #입력 텍스트를 target_language로 번역
-    #욕설, 공격적인 표현을 정제
-
-    language_map={
-        "ko": "Korean",
-        "en": "English",
-        "vi": "Vietnamese",
-        "zh_cn": "Chinese(Simplified)",
-        "zh_tw": "Chinese(Traditional)"
-    }
-
-    target_lang_full=language_map.get(target_language.lower(), "English")
-
-    prompt=(
+    lang = LANGUAGES.get(target_language.upper(), LANGUAGES["EN"])
+    target_lang_full = lang["name"]
+    prompt = (
         f"You are a professional medical translator. "
         f"Translate the given short text to {target_lang_full} if it is not already in that language. "
         f"Do NOT explain what language the input is in. "
@@ -370,7 +383,6 @@ def translate_text(text, target_language="en"):
         f"If the text is already in {target_lang_full}, return it as is (cleaned). "
         f"If the text contains any vulgar or offensive expressions, rewrite them politely. "
     )
-
     try:
         response=openai.chat.completions.create(
             model="gpt-4",
@@ -380,7 +392,6 @@ def translate_text(text, target_language="en"):
             ],
             temperature=0.3
         )
-
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[GPT translation error]: {e}")
@@ -393,14 +404,8 @@ def summarize_symptom_keywords(keywords: list[str], language: str = "KO") -> str
     """
     import openai
     import json
-    language_map = {
-        "KO": "한국어",
-        "EN": "English",
-        "VI": "Vietnamese",
-        "ZH_CN": "Chinese (Simplified)",
-        "ZH_TW": "Chinese (Traditional)"
-    }
-    lang_str = language_map.get(language.upper(), "한국어")
+    lang = LANGUAGES.get(language.upper(), LANGUAGES["KO"])
+    lang_str = lang["name"]
     keywords_str = ", ".join([str(k) for k in keywords if k])
     prompt = (
         f"아래 키워드를 참고해서 환자 증상을 50자 이내의 제목 형식으로 요약해줘. 반드시 {lang_str}로만 답변해.\n키워드: {keywords_str}"
@@ -414,13 +419,13 @@ def summarize_symptom_keywords(keywords: list[str], language: str = "KO") -> str
             temperature=0.3
         )
         summary = response.choices[0].message.content.strip()
-        # 50자 이내로 자르기 (혹시 LLM이 길게 줄 경우)
+        #50자 이내로 자르기 (혹시 LLM이 길게 줄 경우)
         if language.upper() == "KO" and len(summary) > 50:
             summary = summary[:50]
         return summary
     except Exception as e:
         print(f"[summarize_symptom_keywords error]: {e}")
-        # fallback: 키워드 단순 조합
+        #fallback: 키워드 단순 조합
         return keywords_str[:50]
 
 def summarize_symptom_input(symptom_input_text: str, language: str = "KO") -> str:
@@ -429,14 +434,8 @@ def summarize_symptom_input(symptom_input_text: str, language: str = "KO") -> st
     language: 'KO', 'EN' 등
     """
     import openai
-    language_map = {
-        "KO": "한국어",
-        "EN": "English",
-        "VI": "Vietnamese",
-        "ZH_CN": "Chinese (Simplified)",
-        "ZH_TW": "Chinese (Traditional)"
-    }
-    lang_str = language_map.get(language.upper(), "한국어")
+    lang = LANGUAGES.get(language.upper(), LANGUAGES["KO"])
+    lang_str = lang["name"]
     prompt = (
         f"아래 환자 증상 정보를 300자 이내로 자연스럽게 요약해줘. 반드시 {lang_str}로만 답변해.\n{symptom_input_text}"
     )
@@ -449,11 +448,85 @@ def summarize_symptom_input(symptom_input_text: str, language: str = "KO") -> st
             temperature=0.3
         )
         summary = response.choices[0].message.content.strip()
-        # 300자 이내로 자르기 (혹시 LLM이 길게 줄 경우)
+        #300자 이내로 자르기 (혹시 LLM이 길게 줄 경우)
         if language.upper() == "KO" and len(summary) > 300:
             summary = summary[:300]
         return summary
     except Exception as e:
         print(f"[summarize_symptom_input error]: {e}")
-        # fallback: 앞 300자만 반환
+        #fallback: 앞 300자만 반환
         return symptom_input_text[:300]
+
+def recommend_drug_llm_response(drug_candidates: list, symptom: str, patient_info: dict, language: str = "KO") -> dict:
+    """
+    FAISS로 추출한 drug 후보(메타데이터)와 증상, 환자 정보를 받아,
+    영어 프롬프트로 concise JSON만 반환하도록 LLM에 요청하는 함수.
+    """
+    import openai
+    import json
+    language_map = {
+        "KO": "Korean",
+        "EN": "English",
+        "VI": "Vietnamese",
+        "ZH_CN": "Chinese (Simplified)",
+        "ZH_TW": "Chinese (Traditional)",
+        "NE": "Nepali",
+        "ID": "Indonesian",
+        "TH": "Thai"
+    }
+    lang_str = language_map.get(language.upper(), "Korean")
+    candidate_summaries = []
+    for drug in drug_candidates:
+        summary = f"Name: {drug.get('itemName', '')}, Purpose: {drug.get('efcyQesitm', '')}, Image: {drug.get('itemImage', '')}"
+        candidate_summaries.append(summary)
+    candidates_text = "\n".join(candidate_summaries)
+
+    #증상 키워드 추출(간단화, 실제로는 증상에서 주요 단어만 추출)
+    symptom_keyword = symptom.replace("요", "").replace(".", "").strip()
+    #3번 질문용 patient_info 요약
+    pi = patient_info or {}
+    pi_parts = []
+    if pi.get("allergy"): pi_parts.append(f"알레르기:{pi['allergy']}")
+    if pi.get("familyHistory"): pi_parts.append(f"가족력:{pi['familyHistory']}")
+    if pi.get("nowMedicine"): pi_parts.append(f"현재복용약:{pi['nowMedicine']}")
+    if pi.get("pastHistory"): pi_parts.append(f"과거병력:{pi['pastHistory']}")
+    pi_summary = ", ".join(pi_parts)
+
+    prompt = (
+        f"You are a medical AI assistant. Based on the following symptom, patient information, and drug candidates, recommend the best over-the-counter drug and provide the following fields. Respond ONLY with a valid JSON object, no explanation, no markdown, no extra text. Keep all answers as concise and clear as possible.\n\n"
+        f"Drug candidates (for your reference):\n{candidates_text}\n\n"
+        f"Required JSON fields:\n"
+        f"- drug_name: string (MUST be in Korean, do NOT translate)\n"
+        f"- drug_purpose: string (MUST be a translation of the 'efcyQesitm' field of the selected drug, in {lang_str})\n"
+        f"- drug_image_url: string (MUST be the 'itemImage' field of the selected drug, or empty string)\n"
+        f"- pharmacist_questions: array of up to 3 questions, each as follows:\n"
+        f"    1. '{symptom_keyword}에 좋은 약 있을까요?({'{lang_str} translation' if language.upper() != 'KO' else ''})'\n"
+        f"    2. '{symptom}한데 적합한 약이 있으신가요?({'{lang_str} translation' if language.upper() != 'KO' else ''})'\n"
+        f"    3. (optional) If any of allergy, familyHistory, nowMedicine, pastHistory are present in patient_info, add:\n"
+        f"       '환자에게 처방 시 다음 내용을 참고해주세요\\n{pi_summary} ({lang_str} translation)'\n"
+        f"    * If 3번 질문에 해당하는 정보가 없으면 3번 질문은 생략.\n"
+        f"    * If language is Korean, do not include translation part.\n"
+        f"\nExample:\n"
+        f"{{\n"
+        f"  \"drug_name\": \"타이레놀\",\n"
+        f"  \"drug_purpose\": \"For mild to moderate pain relief and fever reduction.\",\n"
+        f"  \"drug_image_url\": \"http://...\",\n"
+        f"  \"pharmacist_questions\": [\"목감기에 좋은 약 있을까요?(Is there a good medicine for sore throat?)\", \"목감기한데 적합한 약이 있으신가요?(Is there a suitable medicine for sore throat?)\", \"환자에게 처방 시 다음 내용을 참고해주세요\\n알레르기:penicillin(Allergy: penicillin)\"],\n"
+        f"}}\n\n"
+        f"Symptom: {symptom}\n"
+        f"Patient info: {json.dumps(patient_info, ensure_ascii=False)}\n"
+        f"Answer in JSON, following the above rules."
+    )
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[
+                {"role": "system", "content": prompt}
+            ],
+            temperature=0.3
+        )
+        result = response.choices[0].message.content.strip()
+        return json.loads(result)
+    except Exception as e:
+        print(f"[recommend_drug_llm_response error]: {e}")
+        return {}

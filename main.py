@@ -451,10 +451,9 @@ async def recommend_drug_for_symptom(request: Request):
             "drug_name": result["drug_name"],
             "drug_purpose": result["drug_purpose"],
             "drug_image_url": result["drug_image_url"],
-            "pharmacist_question1": result["pharmacist_question1"],
-            "pharmacist_question2": result["pharmacist_question2"],
-            "pharmacist_question3": result.get("pharmacist_question3", ""),
-            "warning_message": result["warning_message"]
+            "pharmacist_question1": result["pharmacist_questions"][0] if len(result["pharmacist_questions"]) > 0 else "",
+            "pharmacist_question2": result["pharmacist_questions"][1] if len(result["pharmacist_questions"]) > 1 else "",
+            "pharmacist_question3": result["pharmacist_questions"][2] if len(result["pharmacist_questions"]) > 2 else ""
         }
 
         print("Drug recommendation response:", final_response, flush=True)
@@ -521,9 +520,6 @@ async def pre_question_2(request: Request):
         symptom_info = data.get('symptom', {})
         intensity = symptom_info.get('intensity', '')
         startDate = symptom_info.get('startDate', '')
-        durationValue = symptom_info.get('durationValue', '')
-        durationUnit = symptom_info.get('durationUnit', '')
-        state = symptom_info.get('state', '')
         additional = symptom_info.get('additional', '')
 
         symptoms_for_llm = {
@@ -531,8 +527,6 @@ async def pre_question_2(request: Request):
             "selectedSign": selectedSign,
             "intensity": intensity,
             "startDate": startDate,
-            "duration": f"{durationValue} {durationUnit}",
-            "state": state,
             "additional": additional
         }
 
@@ -548,6 +542,7 @@ async def pre_question_2(request: Request):
             # 딕셔너리에서 직접 영어 번역 가져오기
             english_translation = DEPARTMENT_TRANSLATIONS.get(department_ko, {}).get("EN", "")
             department_field = f"{department_ko} ({romanized}, {english_translation})"
+            department_description = translate_text(department_description, target_language=language.lower())
         # 4. 의사 질문 추천
         questions_ko = recommend_questions_to_doctor(symptoms_for_llm)
         questions_to_doctor = []
@@ -557,17 +552,10 @@ async def pre_question_2(request: Request):
             else:
                 q_trans = translate_text(q_ko, target_language=language.lower())
                 questions_to_doctor.append(f"{q_ko} ({q_trans})")
-        # 5. warning_message
-        warning_ko = "해당 내용은 참고용으로 제공되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
-        if language == "KO":
-            warning_message = warning_ko
-        else:
-            warning_message = translate_text(warning_ko, target_language=language.lower())
         return JSONResponse(content={
             "department": department_field,
             "department_description": department_description,
             "questions_to_doctor": questions_to_doctor,
-            "warning_message": warning_message
         })
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -594,9 +582,6 @@ async def process_symptoms(request: Request):
         durationUnit = symptom_info.get('durationUnit', '')
         state = symptom_info.get('state', '')
         additional = symptom_info.get('additional', '')
-
-        # 증상 요약 텍스트 생성 (영어로)
-        symptom_text_en = f"Body part: {bodypart}\nSymptom: {selectedSign}\nIntensity: {intensity}\nStart date: {startDate}\nDuration: {durationValue} {durationUnit}\nState: {state}\nAdditional: {additional}"
 
         # analyze_symptoms에 넘길 증상 정보 (영어)
         symptoms_for_llm = {
@@ -659,21 +644,13 @@ async def process_symptoms(request: Request):
                 q_trans = translate_text(question_ko, target_language=language.lower())
                 questions_to_doctor_trans[f"question {idx+1}"] = f"{question_ko} ({q_trans})"
 
-        # warning_message 생성
-        warning_ko = "해당 내용은 참고용으로 제공되었으며, 정확한 진단을 위해서는 반드시 의사와 상담하세요."
-        if language == "KO":
-            warning_message = warning_ko
-        else:
-            warning_message = translate_text(warning_ko, target_language=language.lower())
-
         final_response = {
             "created_at_kst": now_kst_str,
             "summary": summary_text,
             "department": department_field,
             "department_description": department_description,
             "symptom_summary": symptom_summary,
-            "questions_to_doctor": questions_to_doctor_trans,
-            "warning_message": warning_message
+            "questions_to_doctor": questions_to_doctor_trans
         }
         return JSONResponse(content=final_response)
     except Exception as e:

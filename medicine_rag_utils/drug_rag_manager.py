@@ -9,7 +9,7 @@ import faiss
 class DrugRAGManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        # keys.config 파일 경로 설정 (프로젝트 루트 기준)
+        #keys.config 파일 경로 설정 (프로젝트 루트 기준)
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(current_dir)
         config_path = os.path.join(project_root, 'keys.config')
@@ -18,7 +18,7 @@ class DrugRAGManager:
         self.faiss_index = None
         self.meta = []
         
-        # 파일 경로 (medicine_rag_utils 폴더 기준)
+        #파일 경로 (medicine_rag_utils 폴더 기준)
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.csv_file = os.path.join(current_dir, "drug_data.csv")
         self.embeddings_file = os.path.join(current_dir, "drug_embeddings.pkl")
@@ -36,7 +36,7 @@ class DrugRAGManager:
             return False
         self.is_initializing = True
         try:
-            # 인덱스와 메타 파일이 있으면 로드
+            #인덱스와 메타 파일이 있으면 로드
             if os.path.exists(self.index_file) and os.path.exists(self.meta_file):
                 print("Loading existing drug index and metadata...")
                 self.faiss_index = faiss.read_index(self.index_file)
