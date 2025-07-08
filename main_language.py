@@ -18,7 +18,10 @@ LANGUAGE_MAPPING = {
     2: "English",
     3: "Vietnamese",
     4: "Chinese_Simplified",
-    5: "Chinese_Traditional"
+    5: "Chinese_Traditional",
+    6: "Nepali",           
+    7: "Indonesian",     
+    8: "Thai"              
 }
 
 #main language 조회 함수
