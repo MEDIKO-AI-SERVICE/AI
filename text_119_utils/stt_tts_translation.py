@@ -30,7 +30,10 @@ def translate_and_filter_text(text, target_language="ko"):
         "en":"English",
         "vi":"Vietnamese",
         "zh":"Chinese(Simplified)",
-        "zh-hant":"Chinese(Traditional)"
+        "zh-hant":"Chinese(Traditional)",
+        "ne": "Nepali",
+        "id": "Indonesian",
+        "th": "Thai"
     }
     language = language_map.get(target_language)
 
