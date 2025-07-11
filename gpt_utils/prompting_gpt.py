@@ -4,6 +4,7 @@ import json
 import configparser
 import os
 from rag_utils.rag_search import search_similar_diseases
+import time
 
 #keys.config 파일 경로 설정 (프로젝트 루트 기준)
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -60,11 +61,12 @@ LANGUAGES = {
 
 def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=False):
     import openai, json
-    
+    t_total = time.time()
     #입력 검증 (딕셔너리 구조)
     if not symptoms or not isinstance(symptoms, dict):
         raise ValueError("증상 정보는 비어있지 않은 딕셔너리여야 합니다.")
 
+    t0 = time.time()
     #RAG 기반 유사 질병 검색 (Top-3)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
@@ -72,6 +74,8 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
     index_path = os.path.join(rag_utils_dir, "combined.index")
     meta_path = os.path.join(rag_utils_dir, "combined_meta.json")
     similar_conditions = search_similar_diseases(list(symptoms.values()), index_path, meta_path, top_k=3)
+    print(f"[latency][RAG] 유사 질병 검색: {time.time() - t0:.3f}초", flush=True)
+    t0 = time.time()
     similar_conditions_for_prompt = [
         {
             "disease": item["disease"],
@@ -109,7 +113,8 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
 
     if not (bodypart or selectedSign or intensity or startDate or duration or state or additional):
         raise ValueError("유효한 증상 정보가 없습니다.")
-    
+    t1 = time.time()
+    # 프롬프트 생성 시간 측정
     prompt=(
         "You are a medical assistant. ALL your answers MUST be in Korean. (모든 답변은 반드시 한국어로 작성하세요.)\n\n"
         "Your task is to return the following fields in JSON format:\n\n"
@@ -153,9 +158,9 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
         "}}\n\n"
         "Respond ONLY with valid JSON. Do NOT include any explanation or formatting. No markdown.\n\n"
     )
-
+    print(f"[latency][RAG] 프롬프트 생성: {time.time() - t1:.3f}초", flush=True)
     user_content = f"Symptoms: {symptom_description}{patient_info_text}"
-
+    t2 = time.time()
     response=openai.chat.completions.create(
         model="gpt-4-turbo",
         messages=[
@@ -167,12 +172,11 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
         ],
         temperature=0.3
     )
-
+    print(f"[latency][RAG] LLM 호출: {time.time() - t2:.3f}초", flush=True)
     result=json.loads(response.choices[0].message.content.strip())
-
     if exclude_possible_conditions and "possible_conditions" in result:
         del result["possible_conditions"]
-
+    print(f"[latency][RAG] 전체 소요 시간: {time.time() - t_total:.3f}초", flush=True)
     return result
 
 def romanize_korean_names(names: list[str]) -> dict:
@@ -481,9 +485,6 @@ def recommend_drug_llm_response(drug_candidates: list, symptom: str, patient_inf
         candidate_summaries.append(summary)
     candidates_text = "\n".join(candidate_summaries)
 
-    #증상 키워드 추출(간단화, 실제로는 증상에서 주요 단어만 추출)
-    symptom_keyword = symptom.replace("요", "").replace(".", "").strip()
-    #3번 질문용 patient_info 요약
     pi = patient_info or {}
     pi_parts = []
     if pi.get("allergy"): pi_parts.append(f"알레르기:{pi['allergy']}")
@@ -493,29 +494,30 @@ def recommend_drug_llm_response(drug_candidates: list, symptom: str, patient_inf
     pi_summary = ", ".join(pi_parts)
 
     prompt = (
-        f"You are a medical AI assistant. Based on the following symptom, patient information, and drug candidates, recommend the best over-the-counter drug and provide the following fields. Respond ONLY with a valid JSON object, no explanation, no markdown, no extra text. Keep all answers as concise and clear as possible.\n\n"
-        f"Drug candidates (for your reference):\n{candidates_text}\n\n"
-        f"Required JSON fields:\n"
-        f"- drug_name: string (MUST be in Korean, do NOT translate)\n"
+        f"You are a medical AI assistant. Your answers must be in Korean.\n"
+        f"First, extract a concise symptom keyword or short phrase (2-10 characters, in Korean) that best summarizes the following symptom input.\n"
+        f"You MUST recommend ONLY from the following drug candidates list. Do NOT recommend anything that is not in the list.\n"
+        f"Then, use that keyword/phrase to generate two natural, polite (해요체) questions for a pharmacist as follows:\n"
+        f"1. '[키워드]에 좋은 약' (Use the extracted keyword/phrase in place of [키워드]. Do NOT just paste the whole symptom if it is a long sentence. Write ONLY as a noun phrase. Do NOT end with a question or use '있을까요?'.)\n"
+        f"2. '[키워드] 증상이 있어요. 적합한 약이 있으신가요?' (Again, use the keyword/phrase, not the whole sentence.)\n"
+        f"If the symptom is a sentence, extract the main keyword or summarize it concisely for use in the questions.\n"
+        f"If patient information is present (allergy, familyHistory, nowMedicine, pastHistory), add a third question: '환자에게 처방 시 다음 내용을 참고해주세요\\n{pi_summary}'\n"
+        f"Return ONLY a valid JSON object with the following fields:\n"
+        f"- drug_name: string (MUST be in Korean, do NOT translate, MUST be one of the drug candidates below)\n"
         f"- drug_purpose: string (MUST be a translation of the 'efcyQesitm' field of the selected drug, in {lang_str})\n"
         f"- drug_image_url: string (MUST be the 'itemImage' field of the selected drug, or empty string)\n"
-        f"- pharmacist_questions: array of up to 3 questions, each as follows:\n"
-        f"    1. '{symptom_keyword}에 좋은 약 있을까요?({'{lang_str} translation' if language.upper() != 'KO' else ''})'\n"
-        f"    2. '{symptom}한데 적합한 약이 있으신가요?({'{lang_str} translation' if language.upper() != 'KO' else ''})'\n"
-        f"    3. (optional) If any of allergy, familyHistory, nowMedicine, pastHistory are present in patient_info, add:\n"
-        f"       '환자에게 처방 시 다음 내용을 참고해주세요\\n{pi_summary} ({lang_str} translation)'\n"
-        f"    * If 3번 질문에 해당하는 정보가 없으면 3번 질문은 생략.\n"
-        f"    * If language is Korean, do not include translation part.\n"
+        f"- pharmacist_questions: array of up to 3 questions, as described above.\n"
+        f"\nDrug candidates (choose ONLY from this list!):\n{candidates_text}\n"
         f"\nExample:\n"
         f"{{\n"
         f"  \"drug_name\": \"타이레놀\",\n"
         f"  \"drug_purpose\": \"For mild to moderate pain relief and fever reduction.\",\n"
         f"  \"drug_image_url\": \"http://...\",\n"
-        f"  \"pharmacist_questions\": [\"목감기에 좋은 약 있을까요?(Is there a good medicine for sore throat?)\", \"목감기한데 적합한 약이 있으신가요?(Is there a suitable medicine for sore throat?)\", \"환자에게 처방 시 다음 내용을 참고해주세요\\n알레르기:penicillin(Allergy: penicillin)\"],\n"
+        f"  \"pharmacist_questions\": [\"목 통증에 좋은 약 있을까요?\", \"목 통증 증상이 있어요. 적합한 약이 있으신가요?\", \"환자에게 처방 시 다음 내용을 참고해주세요\\n알레르기:penicillin\"]\n"
         f"}}\n\n"
-        f"Symptom: {symptom}\n"
+        f"Symptom input: {symptom}\n"
         f"Patient info: {json.dumps(patient_info, ensure_ascii=False)}\n"
-        f"Answer in JSON, following the above rules."
+        f"Answer in JSON, following the above rules. Do NOT include any explanation or extra text."
     )
     try:
         response = openai.chat.completions.create(

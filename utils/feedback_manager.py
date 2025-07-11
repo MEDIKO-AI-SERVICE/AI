@@ -26,14 +26,14 @@ class FeedbackManager:
         query="""
         SELECT 
             sh.hpid,
-            sh.selected_at,
+            sh.created_at,
             h.name as hospital_name,
             h.department,
             h.clcdnm as hospital_type
         FROM selected_hp sh
         JOIN hospital h ON sh.hpid=h.hpid
         WHERE sh.member_id=%s
-        ORDER BY sh.selected_at DESC
+        ORDER BY sh.created_at DESC
         """
         
         try:
@@ -62,13 +62,13 @@ class FeedbackManager:
         query="""
         SELECT 
             sp.hpid,
-            sp.selected_at,
+            sp.created_at,
             p.dutyname as pharmacy_name,
             p.dutyaddr as address
         FROM selected_ph sp
         JOIN pharmacy p ON sp.hpid=p.hpid
         WHERE sp.member_id=%s
-        ORDER BY sp.selected_at DESC
+        ORDER BY sp.created_at DESC
         """
         
         try:
@@ -90,7 +90,7 @@ class FeedbackManager:
             
         #최근 선택된 병원인 경우 0.2
         recent_selections=feedback_data[
-            feedback_data['selected_at'] > datetime.now() - timedelta(days=7)
+            feedback_data['created_at'] > datetime.now() - timedelta(days=7)
         ]
         
         if hospital_data['name'] in recent_selections['hospital_name'].values:
@@ -105,7 +105,7 @@ class FeedbackManager:
             
         #최근 선택된 약국인 경우 0.2
         recent_selections=feedback_data[
-            feedback_data['selected_at'] > datetime.now() - timedelta(days=7)
+            feedback_data['created_at'] > datetime.now() - timedelta(days=7)
         ]
         
         if pharmacy_data['dutyname'] in recent_selections['pharmacy_name'].values:

@@ -40,11 +40,11 @@ def retrain_models():
     query = """
     SELECT DISTINCT member_id 
     FROM (
-        SELECT member_id, selected_at FROM selected_hp
+        SELECT member_id, created_at FROM selected_hp
         UNION
-        SELECT member_id, selected_at FROM selected_ph
+        SELECT member_id, created_at FROM selected_ph
     ) combined
-    WHERE selected_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+    WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
     """
     try:
         db_connection = get_db_connection()

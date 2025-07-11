@@ -5,8 +5,9 @@ from typing import List, Dict, Any
 from rag_utils.rag_search import get_embedding
 from gpt_utils.prompting_gpt import translate_text, romanize_korean_names, recommend_drug_llm_response
 import re
+import time
 
-def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: str, language: str = "ko", patient_info: Dict = None, top_k: int = 5) -> Dict[str, Any]:
+def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: str, language: str = "ko", patient_info: Dict = None, top_k: int = 3) -> Dict[str, Any]:
     """
     증상에 따른 약품 추천과 약사에게 할 질문을 생성합니다.
     
@@ -22,32 +23,42 @@ def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: 
     Returns:
         추천 결과와 질문 리스트
     """
+    start_total = time.time()
+    t0 = time.time()
     #1단계: 증상을 한국어로 변환 (RAG 검색을 위해)
     korean_symptom = convert_symptom_to_korean(symptom, language)
-    
+    print(f"[latency][RAG] 증상 번역: {time.time() - t0:.3f}초", flush=True)
+    t0 = time.time()
     #2단계: 환자 정보를 고려한 검색 범위 확장
     #환자 정보가 있으면 더 많은 후보를 검색하여 필터링
-    search_k = top_k * 3 if patient_info else top_k
+    search_k = top_k * 2 if patient_info else top_k
     
     #한국어 증상으로 RAG 검색
     query_emb = get_embedding(korean_symptom, openai_api_key).reshape(1, -1)
+    print(f"[latency][RAG] 임베딩 생성: {time.time() - t0:.3f}초", flush=True)
+    t0 = time.time()
     #FAISS 검색 (Python 바인딩)
     D, I = faiss_index.search(query_emb, search_k)
-    
+    print(f"[latency][RAG] FAISS 검색: {time.time() - t0:.3f}초", flush=True)
+    t0 = time.time()
     #후보 약품들 선택
     candidates = [meta[i] for i in I[0]]
     
     #3단계: 환자 정보를 고려한 약품 필터링 및 순위 조정
     filtered_candidates = filter_and_rank_drugs(candidates, patient_info, korean_symptom)
-    
+    print(f"[latency][RAG] 후보 필터링/랭킹: {time.time() - t0:.3f}초", flush=True)
+    t0 = time.time()
     #4단계: 최적 약품 후보 top-N 전달 (없으면 에러)
     if not filtered_candidates:
+        print(f"[latency][RAG] 전체 소요 시간(에러): {time.time() - start_total:.3f}초", flush=True)
         return create_error_response("적합한 약품을 찾을 수 없습니다.", language)
     
-    top_candidates = filtered_candidates[:5]  #LLM에 넘길 후보 수 조정 가능
+    top_candidates = filtered_candidates[:top_k]  # LLM에 넘길 후보 수도 top_k로 통일
     
     #5단계: LLM에 모든 결과를 한 번에 요청
     result = recommend_drug_llm_response(top_candidates, symptom, patient_info)
+    print(f"[latency][RAG] LLM 호출: {time.time() - t0:.3f}초", flush=True)
+    print(f"[latency][RAG] 전체 소요 시간: {time.time() - start_total:.3f}초", flush=True)
     
     return result
 
