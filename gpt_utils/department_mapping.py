@@ -449,13 +449,3 @@ DEPARTMENT_DESCRIPTIONS = {
         "TH": "แผนกนี้รับผิดชอบความปลอดภัยของผู้ป่วยที่ได้รับการผ่าตัดต่างๆ และการจัดการการระงับความรู้สึก และให้การดูแลทางการแพทย์สำหรับผู้ป่วยที่มีอาการปวดผ่านคลินิกปวด"
     }
 }
-def get_department_translation(dept_ko: str, language: str) -> dict:
-    translations=DEPARTMENT_TRANSLATIONS.get(dept_ko)
-    if not translations:
-        return {"KO": dept_ko}
-    if language == "KO":
-        return {"KO": translations["KO"]}
-    return {
-        "KO": translations["KO"],
-        language: translations.get(language, "")
-    }

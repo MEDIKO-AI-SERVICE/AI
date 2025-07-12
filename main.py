@@ -22,14 +22,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from gpt_utils.prompting_gpt import (
-    analyze_symptoms,
+    analyze_symptoms_with_summary,
     romanize_korean_names,
     select_department_for_symptoms,
     recommend_questions_to_doctor,
     get_body_part_adjectives,
     translate_text,
-    summarize_symptom_keywords,
-    summarize_symptom_input
+    recommend_drug_llm_response
 )
 from gpt_utils.department_mapping import DEPARTMENT_TRANSLATIONS, DEPARTMENT_ROMANIZATION, DEPARTMENT_DESCRIPTIONS
 
@@ -530,13 +529,13 @@ async def pre_question_2(request: Request):
         department_description_dict = DEPARTMENT_DESCRIPTIONS.get(department_ko, {})
         department_description = department_description_dict.get(language, department_description_dict.get("KO", ""))
         
+        translations = DEPARTMENT_TRANSLATIONS.get(department_ko, {})
+        romanized = DEPARTMENT_ROMANIZATION.get(department_ko, "")
+        translated = translations.get(language, department_ko)  # fallback to Korean if not found
         if language == "KO":
             department_field = department_ko
         else:
-            # 미리 정의된 로마자 표기 사용
-            romanized = DEPARTMENT_ROMANIZATION.get(department_ko, "")
-            english_translation = DEPARTMENT_TRANSLATIONS.get(department_ko, {}).get("EN", "")
-            department_field = f"{department_ko} ({romanized}, {english_translation})"
+            department_field = f"{department_ko} ({romanized}, {translated})"
         print(f"[latency] 진료과 설명/번역: {time.time() - t0:.3f}초", flush=True)
         t0 = time.time()
         questions_ko = recommend_questions_to_doctor(symptoms_for_llm)
@@ -577,8 +576,10 @@ async def process_symptoms(request: Request):
         nowMedicine = patientinfo.get('nowMedicine', '')
         pastHistory = patientinfo.get('pastHistory', '')
         familyHistory = patientinfo.get('familyHistory', '')
-        bodypart = data.get('bodypart', '')
+        bodypart = data.get('bodypart', '') or data.get('body_part', '')
         selectedSign = data.get('selectedSign', '')
+        if isinstance(selectedSign, list):
+            selectedSign = ', '.join(str(s) for s in selectedSign)
         symptom_info = data.get('symptom', {})
         intensity = symptom_info.get('intensity', '')
         startDate = symptom_info.get('startDate', '')
@@ -586,85 +587,51 @@ async def process_symptoms(request: Request):
         durationUnit = symptom_info.get('durationUnit', '')
         state = symptom_info.get('state', '')
         additional = symptom_info.get('additional', '')
+        print(f"[DEBUG] bodypart: {bodypart}")
+        print(f"[DEBUG] selectedSign: {selectedSign}")
+        print(f"[DEBUG] intensity: {intensity}")
+        print(f"[DEBUG] startDate: {startDate}")
+        print(f"[DEBUG] durationValue: {durationValue}")
+        print(f"[DEBUG] durationUnit: {durationUnit}")
+        print(f"[DEBUG] state: {state}")
+        print(f"[DEBUG] additional: {additional}")
+        print(f"[DEBUG] patientinfo: {patientinfo}")
         print(f"[latency] 파라미터 파싱: {time.time() - t0:.3f}초", flush=True)
         t0 = time.time()
         symptoms_for_llm = {
-            "bodypart": bodypart,
-            "selectedSign": selectedSign,
-            "intensity": intensity,
-            "startDate": startDate,
+            "bodypart": str(bodypart) if bodypart is not None else '',
+            "selectedSign": str(selectedSign) if selectedSign is not None else '',
+            "intensity": str(intensity) if intensity is not None else '',
+            "startDate": str(startDate) if startDate is not None else '',
             "duration": f"{durationValue} {durationUnit}",
-            "state": state,
-            "additional": additional,
-            "gender": gender,
-            "age": age_str,
-            "allergy": allergy,
-            "nowMedicine": nowMedicine,
-            "pastHistory": pastHistory,
-            "familyHistory": familyHistory
+            "state": str(state) if state is not None else '',
+            "additional": str(additional) if additional is not None else '',
+            "gender": str(gender) if gender is not None else '',
+            "age": str(age_str) if age_str is not None else '',
+            "allergy": str(allergy) if allergy is not None else '',
+            "nowMedicine": str(nowMedicine) if nowMedicine is not None else '',
+            "pastHistory": str(pastHistory) if pastHistory is not None else '',
+            "familyHistory": str(familyHistory) if familyHistory is not None else ''
         }
-        analysis = analyze_symptoms(symptoms_for_llm, patientinfo, exclude_possible_conditions=True)
+        analysis_result = analyze_symptoms_with_summary(symptoms_for_llm, patientinfo, language)
         print(f"[latency] 증상 분석(LLM): {time.time() - t0:.3f}초", flush=True)
         t0 = time.time()
         now_kst = datetime.utcnow() + timedelta(hours=9)
         now_kst_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
-        symptom_input_text = f"환자 정보: {gender}, {age_str}세\n신체 부위: {bodypart}\n증상 설명: {selectedSign}\n강도: {intensity}\n시작일: {startDate}\n지속 기간: {durationValue} {durationUnit}\n상태: {state}"
-        if allergy:
-            symptom_input_text += f"\n알레르기: {allergy}"
-        if nowMedicine:
-            symptom_input_text += f"\n복용약: {nowMedicine}"
-        if pastHistory:
-            symptom_input_text += f"\n과거력: {pastHistory}"
-        if familyHistory:
-            symptom_input_text += f"\n가족력: {familyHistory}"
-        if additional:
-            symptom_input_text += f"\n추가 설명: {additional}"
-        symptom_summary_ko = summarize_symptom_input(symptom_input_text, language="KO")
-        if language != "KO":
-            symptom_summary_trans = summarize_symptom_input(symptom_input_text, language=language)
-            symptom_summary = f"{symptom_summary_ko} ({symptom_summary_trans})"
-        else:
-            symptom_summary = symptom_summary_ko
-        print(f"[latency] 증상 요약(LLM): {time.time() - t0:.3f}초", flush=True)
-        t0 = time.time()
-        summary_keywords = []
-        if gender:
-            summary_keywords.append(str(gender))
-        if age_str:
-            summary_keywords.append(f"{age_str}세")
-        if allergy:
-            summary_keywords.append(f"알레르기:{allergy}")
-        if nowMedicine:
-            summary_keywords.append(f"복용약:{nowMedicine}")
-        if pastHistory:
-            summary_keywords.append(f"과거력:{pastHistory}")
-        if familyHistory:
-            summary_keywords.append(f"가족력:{familyHistory}")
-        if bodypart:
-            summary_keywords.append(str(bodypart))
-        if selectedSign:
-            summary_keywords.append(str(selectedSign))
-        if durationValue or durationUnit:
-            summary_keywords.append(f"{durationValue}{durationUnit}".strip())
-        if state:
-            summary_keywords.append(str(state))
-        if additional:
-            summary_keywords.append(str(additional))
-        summary_text = summarize_symptom_keywords(summary_keywords, language)
-        print(f"[latency] 증상 키워드 요약(LLM): {time.time() - t0:.3f}초", flush=True)
-        t0 = time.time()
-        department_ko = analysis["department_ko"]
+        department_ko = analysis_result["department_ko"]
+        symptom_summary = analysis_result["symptom_summary"]
+        summary_text = analysis_result["summary_text"]
         # 진료과 설명 (언어별)
         department_description_dict = DEPARTMENT_DESCRIPTIONS.get(department_ko, {})
         department_description = department_description_dict.get(language, department_description_dict.get("KO", ""))
         
+        translations = DEPARTMENT_TRANSLATIONS.get(department_ko, {})
+        romanized = DEPARTMENT_ROMANIZATION.get(department_ko, "")
+        translated = translations.get(language, department_ko)  # fallback to Korean if not found
         if language == "KO":
             department_field = department_ko
         else:
-            # 미리 정의된 로마자 표기 사용
-            romanized = DEPARTMENT_ROMANIZATION.get(department_ko, "")
-            english_translation = DEPARTMENT_TRANSLATIONS.get(department_ko, {}).get("EN", "")
-            department_field = f"{department_ko} ({romanized}, {english_translation})"
+            department_field = f"{department_ko} ({romanized}, {translated})"
         questions_to_doctor_list = recommend_questions_to_doctor(symptoms_for_llm)
         questions_to_doctor_trans = {}
         for idx, question_ko in enumerate(questions_to_doctor_list):

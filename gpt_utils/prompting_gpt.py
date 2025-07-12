@@ -1,4 +1,3 @@
-from .department_mapping import get_department_translation
 import openai
 import json
 import configparser
@@ -59,9 +58,14 @@ LANGUAGES = {
     },
 }
 
-def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=False):
+def analyze_symptoms_with_summary(symptoms, patient_info=None, language="KO"):
+    """
+    증상 분석과 요약을 한 번에 처리합니다.
+    기존 analyze_symptoms, summarize_symptom_input, summarize_symptom_keywords를 통합합니다.
+    """
     import openai, json
     t_total = time.time()
+    
     #입력 검증 (딕셔너리 구조)
     if not symptoms or not isinstance(symptoms, dict):
         raise ValueError("증상 정보는 비어있지 않은 딕셔너리여야 합니다.")
@@ -71,8 +75,19 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
     rag_utils_dir = os.path.join(project_root, 'rag_utils')
-    index_path = os.path.join(rag_utils_dir, "combined.index")
+    
+    # IVF 인덱스 파일 우선 확인
+    ivf_index_path = os.path.join(rag_utils_dir, "combined_ivf.index")
     meta_path = os.path.join(rag_utils_dir, "combined_meta.json")
+    
+    # IVF 인덱스가 있으면 사용, 없으면 기존 인덱스 사용
+    if os.path.exists(ivf_index_path):
+        index_path = ivf_index_path
+        print("[IVF STATUS] Using IVF index for disease search")
+    else:
+        index_path = os.path.join(rag_utils_dir, "combined.index")
+        print("[IVF STATUS] Using standard index for disease search (no IVF index available)")
+    
     similar_conditions = search_similar_diseases(list(symptoms.values()), index_path, meta_path, top_k=3)
     print(f"[latency][RAG] 유사 질병 검색: {time.time() - t0:.3f}초", flush=True)
     t0 = time.time()
@@ -113,55 +128,76 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
 
     if not (bodypart or selectedSign or intensity or startDate or duration or state or additional):
         raise ValueError("유효한 증상 정보가 없습니다.")
+    
+    # 증상 요약 텍스트 생성
+    symptom_summary_text = f"환자 정보: {patient_info.get('gender', '')}, {patient_info.get('age', '')}세\n신체 부위: {bodypart}\n증상 설명: {selectedSign}\n강도: {intensity}\n시작일: {startDate}\n지속 기간: {duration}\n상태: {state}"
+    if patient_info.get('allergy'):
+        symptom_summary_text += f"\n알레르기: {patient_info['allergy']}"
+    if patient_info.get('nowMedicine'):
+        symptom_summary_text += f"\n복용약: {patient_info['nowMedicine']}"
+    if patient_info.get('pastHistory'):
+        symptom_summary_text += f"\n과거력: {patient_info['pastHistory']}"
+    if patient_info.get('familyHistory'):
+        symptom_summary_text += f"\n가족력: {patient_info['familyHistory']}"
+    if additional:
+        symptom_summary_text += f"\n추가 설명: {additional}"
+    
+    # 증상 키워드 생성
+    summary_keywords = []
+    if patient_info.get('gender'):
+        summary_keywords.append(str(patient_info['gender']))
+    if patient_info.get('age'):
+        summary_keywords.append(f"{patient_info['age']}세")
+    if patient_info.get('allergy'):
+        summary_keywords.append(f"알레르기:{patient_info['allergy']}")
+    if patient_info.get('nowMedicine'):
+        summary_keywords.append(f"복용약:{patient_info['nowMedicine']}")
+    if patient_info.get('pastHistory'):
+        summary_keywords.append(f"과거력:{patient_info['pastHistory']}")
+    if patient_info.get('familyHistory'):
+        summary_keywords.append(f"가족력:{patient_info['familyHistory']}")
+    if bodypart:
+        summary_keywords.append(str(bodypart))
+    if selectedSign:
+        summary_keywords.append(str(selectedSign))
+    if duration:
+        summary_keywords.append(str(duration))
+    if state:
+        summary_keywords.append(str(state))
+    if additional:
+        summary_keywords.append(str(additional))
+    
     t1 = time.time()
-    # 프롬프트 생성 시간 측정
-    prompt=(
-        "You are a medical assistant. ALL your answers MUST be in Korean. (모든 답변은 반드시 한국어로 작성하세요.)\n\n"
-        "Your task is to return the following fields in JSON format:\n\n"
-        "1) 'department_ko': Based on the provided symptoms, return the most relevant Korean department (진료과) name.Choose only from the following Korean departments:\n"
-        "   - 가정의학과\n"
-        "   - 내과\n"
-        "   - 마취통증의학과\n"
-        "   - 비뇨의학과\n"
-        "   - 산부인과\n"
-        "   - 성형외과\n"
-        "   - 소아청소년과\n"
-        "   - 신경과\n"
-        "   - 신경외과\n"
-        "   - 심장혈관흉부외과\n"
-        "   - 안과\n"
-        "   - 영상의학과\n"
-        "   - 예방의학과\n"
-        "   - 외과\n"
-        "   - 이비인후과\n"
-        "   - 재활의학과\n"
-        "   - 정신건강의학과\n"
-        "   - 정형외과\n"
-        "   - 치의과\n"
-        "   - 피부과\n"
-        "   - 한방과\n\n"
-        "2) 'possible_conditions': A list of objects, each with a 'condition' field containing the disease name in Korean. Use the following similar conditions as reference:\n"
-        f"{json.dumps(similar_conditions_for_prompt, ensure_ascii=False, indent=2)}\n\n"
-        "3) 'symptom_checklist': A list of objects. Each object must contain:\n"
-        "   - 'condition_ko': the condition name in Korean\n"
-        "   - 'symptoms': a list of symptom names in Korean\n\n"
-        "Use only medically relevant conditions based on the symptoms. Use formal medical language.\n\n"
-        f"Respond ONLY with valid JSON in the following structure:\n"
-        "{{\n"
-        '  "department_ko": "정형외과", \n'
-        '  "possible_conditions": [ {{"condition": "..."}} ],\n'
-        '  "symptom_checklist": {{\n'
-        '    "무릎 관절염": {{\n'
-        '      "symptoms": [ "..." ]\n'
-        "    }}\n"
-        "  }}\n"
-        "}}\n\n"
-        "Respond ONLY with valid JSON. Do NOT include any explanation or formatting. No markdown.\n\n"
-    )
+    # 통합 프롬프트 생성
+    prompt = f"""당신은 의학 전문가입니다. 다음 증상 정보를 분석하여 진료과, 증상 요약, 키워드 요약을 한 번에 제공해주세요.
+
+환자 정보:
+{patient_info_text}
+
+증상 정보:
+{symptom_description}
+
+유사 질병 참고:
+{json.dumps(similar_conditions_for_prompt, ensure_ascii=False, indent=2)}
+
+다음 JSON 형식으로 응답해주세요:
+{{
+    "department_ko": "진료과명",
+    "symptom_summary_ko": "증상 요약 (한국어)",
+    "symptom_summary_trans": "증상 요약 (번역)",
+    "summary_keywords_ko": "키워드 요약 (한국어)",
+    "summary_keywords_trans": "키워드 요약 (번역)"
+}}
+
+진료과는 다음 중에서 선택하세요:
+가정의학과, 내과, 마취통증의학과, 비뇨의학과, 산부인과, 성형외과, 소아청소년과, 신경과, 신경외과, 심장혈관흉부외과, 안과, 영상의학과, 예방의학과, 외과, 이비인후과, 재활의학과, 정신건강의학과, 정형외과, 치의과, 피부과, 한방과
+
+모든 답변은 반드시 한국어로 작성하세요."""
+
     print(f"[latency][RAG] 프롬프트 생성: {time.time() - t1:.3f}초", flush=True)
     user_content = f"Symptoms: {symptom_description}{patient_info_text}"
     t2 = time.time()
-    response=openai.chat.completions.create(
+    response = openai.chat.completions.create(
         model="gpt-4-turbo",
         messages=[
             {"role": "system", "content": prompt},
@@ -173,11 +209,29 @@ def analyze_symptoms(symptoms, patient_info=None, exclude_possible_conditions=Fa
         temperature=0.3
     )
     print(f"[latency][RAG] LLM 호출: {time.time() - t2:.3f}초", flush=True)
-    result=json.loads(response.choices[0].message.content.strip())
-    if exclude_possible_conditions and "possible_conditions" in result:
-        del result["possible_conditions"]
+    result = json.loads(response.choices[0].message.content.strip())
     print(f"[latency][RAG] 전체 소요 시간: {time.time() - t_total:.3f}초", flush=True)
-    return result
+    
+    # 결과를 분리하여 반환
+    department_ko = result.get("department_ko", "")
+    symptom_summary_ko = result.get("symptom_summary_ko", "")
+    symptom_summary_trans = result.get("symptom_summary_trans", "")
+    summary_keywords_ko = result.get("summary_keywords_ko", "")
+    summary_keywords_trans = result.get("summary_keywords_trans", "")
+    
+    # 언어에 따른 요약 텍스트 선택
+    if language.upper() != "KO":
+        symptom_summary = f"{symptom_summary_ko} ({symptom_summary_trans})"
+        summary_text = f"{summary_keywords_ko} ({summary_keywords_trans})"
+    else:
+        symptom_summary = symptom_summary_ko
+        summary_text = summary_keywords_ko
+    
+    return {
+        "department_ko": department_ko,
+        "symptom_summary": symptom_summary,
+        "summary_text": summary_text
+    }
 
 def romanize_korean_names(names: list[str]) -> dict:
     #병원명이나 약국명을 GPT를 사용해 음독(로마자 표기)
@@ -401,65 +455,6 @@ def translate_text(text, target_language="en"):
         print(f"[GPT translation error]: {e}")
         return text  #fallback: 원본 반환
 
-def summarize_symptom_keywords(keywords: list[str], language: str = "KO") -> str:
-    """
-    키워드 리스트를 받아 50자 이내의 한 줄 증상 요약(제목)을 생성한다.
-    language: 'KO', 'EN' 등
-    """
-    import openai
-    import json
-    lang = LANGUAGES.get(language.upper(), LANGUAGES["KO"])
-    lang_str = lang["name"]
-    keywords_str = ", ".join([str(k) for k in keywords if k])
-    prompt = (
-        f"아래 키워드를 참고해서 환자 증상을 50자 이내의 제목 형식으로 요약해줘. 반드시 {lang_str}로만 답변해.\n키워드: {keywords_str}"
-    )
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {"role": "system", "content": prompt}
-            ],
-            temperature=0.3
-        )
-        summary = response.choices[0].message.content.strip()
-        #50자 이내로 자르기 (혹시 LLM이 길게 줄 경우)
-        if language.upper() == "KO" and len(summary) > 50:
-            summary = summary[:50]
-        return summary
-    except Exception as e:
-        print(f"[summarize_symptom_keywords error]: {e}")
-        #fallback: 키워드 단순 조합
-        return keywords_str[:50]
-
-def summarize_symptom_input(symptom_input_text: str, language: str = "KO") -> str:
-    """
-    증상 입력 텍스트를 받아 300자 이내로 자연스럽게 요약(사용자 언어)하는 함수.
-    language: 'KO', 'EN' 등
-    """
-    import openai
-    lang = LANGUAGES.get(language.upper(), LANGUAGES["KO"])
-    lang_str = lang["name"]
-    prompt = (
-        f"아래 환자 증상 정보를 300자 이내로 자연스럽게 요약해줘. 반드시 {lang_str}로만 답변해.\n{symptom_input_text}"
-    )
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {"role": "system", "content": prompt}
-            ],
-            temperature=0.3
-        )
-        summary = response.choices[0].message.content.strip()
-        #300자 이내로 자르기 (혹시 LLM이 길게 줄 경우)
-        if language.upper() == "KO" and len(summary) > 300:
-            summary = summary[:300]
-        return summary
-    except Exception as e:
-        print(f"[summarize_symptom_input error]: {e}")
-        #fallback: 앞 300자만 반환
-        return symptom_input_text[:300]
 
 def recommend_drug_llm_response(drug_candidates: list, symptom: str, patient_info: dict, language: str = "KO") -> dict:
     """
@@ -487,10 +482,33 @@ def recommend_drug_llm_response(drug_candidates: list, symptom: str, patient_inf
 
     pi = patient_info or {}
     pi_parts = []
-    if pi.get("allergy"): pi_parts.append(f"알레르기:{pi['allergy']}")
-    if pi.get("familyHistory"): pi_parts.append(f"가족력:{pi['familyHistory']}")
-    if pi.get("nowMedicine"): pi_parts.append(f"현재복용약:{pi['nowMedicine']}")
-    if pi.get("pastHistory"): pi_parts.append(f"과거병력:{pi['pastHistory']}")
+    
+    # 환자 정보를 한국어로 번역
+    if pi.get("allergy"):
+        try:
+            allergy_translated = translate_text(pi['allergy'], "ko") if pi['allergy'] else ""
+        except:
+            allergy_translated = pi['allergy']  # 번역 실패 시 원본 사용
+        pi_parts.append(f"알레르기:{allergy_translated}")
+    if pi.get("familyHistory"):
+        try:
+            family_translated = translate_text(pi['familyHistory'], "ko") if pi['familyHistory'] else ""
+        except:
+            family_translated = pi['familyHistory']  # 번역 실패 시 원본 사용
+        pi_parts.append(f"가족력:{family_translated}")
+    if pi.get("nowMedicine"):
+        try:
+            medicine_translated = translate_text(pi['nowMedicine'], "ko") if pi['nowMedicine'] else ""
+        except:
+            medicine_translated = pi['nowMedicine']  # 번역 실패 시 원본 사용
+        pi_parts.append(f"현재복용약:{medicine_translated}")
+    if pi.get("pastHistory"):
+        try:
+            history_translated = translate_text(pi['pastHistory'], "ko") if pi['pastHistory'] else ""
+        except:
+            history_translated = pi['pastHistory']  # 번역 실패 시 원본 사용
+        pi_parts.append(f"과거병력:{history_translated}")
+    
     pi_summary = ", ".join(pi_parts)
 
     prompt = (

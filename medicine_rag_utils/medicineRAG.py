@@ -7,6 +7,40 @@ from gpt_utils.prompting_gpt import translate_text, romanize_korean_names, recom
 import re
 import time
 
+def create_ivf_index_for_drugs(embeddings, dimension=1536, nlist=100):
+    """
+    약품 데이터용 IVF 인덱스를 생성합니다.
+    
+    Args:
+        embeddings: 약품 임베딩 배열 (numpy array)
+        dimension: 임베딩 차원 (기본값: 1536)
+        nlist: 클러스터 수 (기본값: 100)
+    
+    Returns:
+        훈련된 IVF 인덱스
+    """
+    print(f"[IVF CREATE] Creating IVF index for {len(embeddings)} drugs with {nlist} clusters...")
+    print(f"[IVF CREATE] Embedding dimension: {dimension}")
+    
+    # IVF 인덱스 생성 (클러스터링 기반)
+    quantizer = faiss.IndexFlatIP(dimension)  # Inner Product for cosine similarity
+    index = faiss.IndexIVFFlat(quantizer, dimension, nlist, faiss.METRIC_INNER_PRODUCT)
+    
+    # 인덱스 훈련
+    print("[IVF CREATE] Training IVF index...")
+    index.train(embeddings)
+    
+    # 데이터 추가
+    print("[IVF CREATE] Adding vectors to IVF index...")
+    index.add(embeddings)
+    
+    # nprobe 설정 (검색 시 탐색할 클러스터 수)
+    index.nprobe = min(10, nlist)  # 검색 정확도와 속도 균형
+    
+    print(f"[IVF CREATE] IVF index created successfully with {index.ntotal} vectors")
+    print(f"[IVF CREATE] Final settings - nlist: {index.nlist}, nprobe: {index.nprobe}")
+    return index
+
 def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: str, language: str = "ko", patient_info: Dict = None, top_k: int = 3) -> Dict[str, Any]:
     """
     증상에 따른 약품 추천과 약사에게 할 질문을 생성합니다.
@@ -37,6 +71,14 @@ def recommend_drug(symptom: str, faiss_index, meta: List[Dict], openai_api_key: 
     query_emb = get_embedding(korean_symptom, openai_api_key).reshape(1, -1)
     print(f"[latency][RAG] 임베딩 생성: {time.time() - t0:.3f}초", flush=True)
     t0 = time.time()
+    
+    # IVF 인덱스 사용 시 nprobe 설정 (이미 생성 시 설정되어 있음)
+    # faiss_index.nprobe = min(10, faiss_index.nlist)  # 필요시 동적 조정
+    
+    # IVF 인덱스 정보 출력
+    if hasattr(faiss_index, 'nlist'):
+        print(f"[IVF INFO] Drug search - nlist: {faiss_index.nlist}, nprobe: {faiss_index.nprobe}")
+    
     #FAISS 검색 (Python 바인딩)
     D, I = faiss_index.search(query_emb, search_k)
     print(f"[latency][RAG] FAISS 검색: {time.time() - t0:.3f}초", flush=True)
@@ -67,6 +109,7 @@ def filter_and_rank_drugs(candidates: List[Dict], patient_info: Dict, symptom: s
     if not patient_info:
         return candidates
     
+    # 키워드 기반 빠른 필터링 (GPT 호출 없이)
     scored_candidates = []
     
     for drug in candidates:
@@ -74,12 +117,7 @@ def filter_and_rank_drugs(candidates: List[Dict], patient_info: Dict, symptom: s
         score = 10
         warnings = []
         
-        #GPT 기반 맥락 분석 (더 정교한 평가)
-        context_score, context_warnings = analyze_drug_context(drug, patient_info, symptom)
-        score += context_score
-        warnings.extend(context_warnings)
-        
-        #기존 키워드 기반 분석 (백업)
+        #키워드 기반 분석 (빠른 필터링)
         keyword_score, keyword_warnings = analyze_drug_keywords(drug, patient_info)
         score += keyword_score
         warnings.extend(keyword_warnings)
@@ -102,21 +140,9 @@ def filter_and_rank_drugs(candidates: List[Dict], patient_info: Dict, symptom: s
     
     return [c['drug'] for c in final_candidates]
 
-def analyze_drug_context(drug: Dict, patient_info: Dict, symptom: str) -> tuple[int, List[str]]:
-    """GPT를 활용한 맥락 기반 약품 분석"""
+def analyze_drug_context_batch(drugs: List[Dict], patient_info: Dict, symptom: str) -> List[tuple[int, List[str]]]:
+    """GPT를 활용한 배치 맥락 기반 약품 분석"""
     try:
-        openai.api_key = openai.api_key
-        
-        #약품 정보 구성
-        drug_info = f"""
-        약품명: {drug.get('itemName', '')}
-        효능: {drug.get('efcyQesitm', '')}
-        복용법: {drug.get('useMethodQesitm', '')}
-        주의사항: {drug.get('atpnQesitm', '')}
-        부작용: {drug.get('seQesitm', '')}
-        상호작용: {drug.get('intrcQesitm', '')}
-        """
-        
         #환자 정보 구성
         patient_context = f"""
         증상: {symptom}
@@ -129,26 +155,51 @@ def analyze_drug_context(drug: Dict, patient_info: Dict, symptom: str) -> tuple[
         과거병력: {patient_info.get('medical_history', 'N/A')}
         """
         
-        prompt = f"""당신은 의학 전문가입니다. 다음 환자 정보와 약품 정보를 분석하여 약품의 적합성을 평가해주세요.
+        # 모든 약품 정보를 하나의 프롬프트로 구성
+        drug_infos = []
+        for i, drug in enumerate(drugs):
+            drug_info = f"""
+            약품 {i+1}:
+            약품명: {drug.get('itemName', '')}
+            효능: {drug.get('efcyQesitm', '')}
+            복용법: {drug.get('useMethodQesitm', '')}
+            주의사항: {drug.get('atpnQesitm', '')}
+            부작용: {drug.get('seQesitm', '')}
+            상호작용: {drug.get('intrcQesitm', '')}
+            """
+            drug_infos.append(drug_info)
+        
+        all_drug_info = "\n".join(drug_infos)
+        
+        prompt = f"""당신은 의학 전문가입니다. 다음 환자 정보와 약품 정보들을 분석하여 각 약품의 적합성을 평가해주세요.
 
 환자 정보:
 {patient_context}
 
 약품 정보:
-{drug_info}
+{all_drug_info}
 
-다음 기준으로 평가해주세요:
+각 약품에 대해 다음 기준으로 평가해주세요:
 1. 증상과 약품 효능의 적합성 (0-5점)
 2. 환자 특성(나이, 성별)과 약품의 적합성 (0-3점)
 3. 안전성 (알레르기, 상호작용, 부작용 고려) (0-5점)
 4. 복용 편의성 (나이, 신체 조건 고려) (0-2점)
 
-총점 (0-15점)과 위험 요소를 JSON 형식으로 응답해주세요:
-{{
-    "score": 점수,
-    "risks": ["위험요소1", "위험요소2"],
-    "reasoning": "평가 근거"
-}}"""
+JSON 배열 형태로 응답해주세요:
+[
+    {{
+        "drug_index": 0,
+        "score": 점수,
+        "risks": ["위험요소1", "위험요소2"],
+        "reasoning": "평가 근거"
+    }},
+    {{
+        "drug_index": 1,
+        "score": 점수,
+        "risks": ["위험요소1", "위험요소2"],
+        "reasoning": "평가 근거"
+    }}
+]"""
 
         client = openai.OpenAI(api_key=openai.api_key)
         response = client.chat.completions.create(
@@ -158,16 +209,21 @@ def analyze_drug_context(drug: Dict, patient_info: Dict, symptom: str) -> tuple[
         )
         
         import json
-        result = json.loads(response.choices[0].message.content)
+        results = json.loads(response.choices[0].message.content)
         
-        return result.get('score', 0), result.get('risks', [])
+        # 결과를 약품 순서대로 정렬
+        sorted_results = sorted(results, key=lambda x: x.get('drug_index', 0))
+        
+        # (score, risks) 튜플 리스트 반환
+        return [(r.get('score', 0), r.get('risks', [])) for r in sorted_results]
         
     except Exception as e:
-        print(f"Error in context analysis: {e}")
-        return 0, []
+        print(f"Error in batch context analysis: {e}")
+        # 에러 시 기본값 반환
+        return [(0, []) for _ in drugs]
 
 def analyze_drug_keywords(drug: Dict, patient_info: Dict) -> tuple[int, List[str]]:
-    """키워드 기반 약품 분석 (환자 특성 고려)"""
+    """키워드 기반 약품 분석 (환자 특성 고려) - 빠른 필터링용"""
     score = 0
     warnings = []
     
@@ -277,105 +333,6 @@ def analyze_drug_keywords(drug: Dict, patient_info: Dict) -> tuple[int, List[str
     
     return score, warnings
 
-def generate_pharmacist_questions(drug: Dict, symptom: str, language: str, patient_info: Dict) -> List[str]:
-    """약사에게 할 질문을 생성합니다."""
-    drug_name = drug.get('itemName', '')
-    drug_purpose = drug.get('efcyQesitm', '')
-    
-    #환자 정보 요약 생성
-    patient_summary = generate_patient_summary(patient_info, language)
-    
-    #증상을 한국어로 변환 (RAG 검색용)
-    korean_symptom = symptom
-    if language.lower() != "ko":
-        korean_symptom = convert_symptom_to_korean(symptom, language)
-    
-    #질문 1: 약국에서 + 증상 관련 키워드 + 약 말씀해보세요
-    question1 = f"약국에서 다음과 같이 말씀해보세요! : \"{korean_symptom}에 좋은 약을 찾고 있어요.\"\n약사님께 직접 말하시기 어려우시면, 아래 문장을 약사님께 보여주세요."
-    
-    #언어가 한국어가 아니면 부분 번역 (증상 부분 제외)
-    if language.lower() != "ko":
-        #증상 부분을 제외한 나머지 부분 번역
-        prefix = "약국에서 다음과 같이 말씀해보세요! : "
-        suffix = "약사님께 직접 말하시기 어려우시면, 아래 문장을 약사님께 보여주세요."
-        
-        translated_prefix = translate_text(prefix, language)
-        translated_suffix = translate_text(suffix, language)
-        
-        question1 = f"{translated_prefix}\"{korean_symptom}에 좋은 약을 찾고 있어요.\"\n{translated_suffix}"
-    
-    #질문 2: 증상만 포함
-    question2 = f'"{symptom}에 먹을 수 있는 약이 있을까요?"'
-    
-    #언어가 한국어가 아니면 번역 추가
-    if language.lower() != "ko":
-        translated_question2 = translate_text(question2, language)
-        question2 = f"{question2}({translated_question2})"
-    
-    #질문 3: 환자 정보가 있을 때만 (증상 제외)
-    question3 = ""
-    if patient_summary:
-        question3 = f'"{patient_summary}"'
-        if language.lower() != "ko":
-            translated_question3 = translate_text(question3, language)
-            question3 = f"{question3}({translated_question3})"
-    
-    return [question1, question2, question3]
-
-def generate_patient_summary(patient_info: Dict, language: str) -> str:
-    """환자 정보를 요약하여 자연스러운 문장으로 생성합니다."""
-    if not patient_info:
-        return ""
-    
-    summary_parts = []
-    
-    #키/몸무게
-    if patient_info.get('height') and patient_info.get('weight'):
-        height = patient_info['height']
-        weight = patient_info['weight']
-        if language.lower() == "ko":
-            summary_parts.append(f"키 {height}cm, 몸무게 {weight}kg")
-        else:
-            summary_parts.append(f"height {height}cm, weight {weight}kg")
-    
-    #알레르기
-    if patient_info.get('allergies'):
-        allergies = patient_info['allergies']
-        if language.lower() == "ko":
-            summary_parts.append(f"알레르기: {allergies}")
-        else:
-            #다른 언어로 입력된 경우 한국어 번역 추가
-            translated_allergies = translate_text(allergies, "ko")
-            summary_parts.append(f"알레르기: {translated_allergies}({allergies})")
-    
-    #현재 복용약
-    if patient_info.get('current_medications'):
-        medications = patient_info['current_medications']
-        if language.lower() == "ko":
-            summary_parts.append(f"현재 복용 중인 약: {medications}")
-        else:
-            #다른 언어로 입력된 경우 한국어 번역 추가
-            translated_medications = translate_text(medications, "ko")
-            summary_parts.append(f"현재 복용 중인 약: {translated_medications}({medications})")
-    
-    #과거 병력
-    if patient_info.get('medical_history'):
-        history = patient_info['medical_history']
-        if language.lower() == "ko":
-            summary_parts.append(f"과거 병력: {history}")
-        else:
-            #다른 언어로 입력된 경우 한국어 번역 추가
-            translated_history = translate_text(history, "ko")
-            summary_parts.append(f"과거 병력: {translated_history}({history})")
-    
-    return ", ".join(summary_parts)
-
-def generate_warning_message(language: str) -> str:
-    """경고 문구를 생성합니다."""
-    if language.lower() == "ko":
-        return "해당 내용은 정보 제공의 목적으로 구현되었으며, 약 복용에 대해서는 반드시 약사와 상담하세요."
-    else:
-        return translate_text("해당 내용은 정보 제공의 목적으로 구현되었으며, 약 복용에 대해서는 반드시 약사와 상담하세요.", language)
 
 def create_error_response(message: str, language: str) -> Dict[str, Any]:
     """에러 응답을 생성합니다."""
@@ -386,9 +343,7 @@ def create_error_response(message: str, language: str) -> Dict[str, Any]:
         "drug_name": "",
         "drug_purpose": "",
         "drug_image_url": "",
-        "pharmacist_question1": "",
-        "pharmacist_question2": "",
-        "pharmacist_question3": "",
+        "pharmacist_questions": [],
         "warning_message": message,
         "error": True
     }
@@ -411,35 +366,3 @@ def convert_symptom_to_korean(symptom: str, source_language: str) -> str:
     except Exception as e:
         print(f"Error converting symptom to Korean: {e}")
         return symptom  #실패 시 원본 반환
-
-def translate_drug_info(drugs: List[Dict], target_language: str) -> List[Dict]:
-    """약품 정보를 대상 언어로 번역합니다."""
-    for drug in drugs:
-        #약품명 번역 및 로마자 표기
-        if drug['itemName']:
-            drug['itemName'] = translate_drug_name(drug['itemName'], target_language)
-        
-        #효능 번역
-        if drug.get('efcyQesitm'):
-            drug['efcyQesitm'] = translate_text(drug['efcyQesitm'], target_language)
-        
-        #주의사항 번역
-        if drug.get('atpnQesitm'):
-            drug['atpnQesitm'] = translate_text(drug['atpnQesitm'], target_language)
-    
-    return drugs
-
-def translate_drug_name(drug_name: str, target_language: str) -> str:
-    """약품명을 번역하고 로마자 표기를 추가합니다."""
-    if target_language.lower() == "ko":
-        return drug_name
-    
-    #기존 romanize_korean_names 함수 활용
-    romanized_map = romanize_korean_names([drug_name])
-    romanized_name = romanized_map.get(drug_name, drug_name)
-    
-    #번역
-    translated_name = translate_text(drug_name, target_language)
-    
-    #원본(로마자) 형태로 반환
-    return f"{drug_name}({romanized_name})"
