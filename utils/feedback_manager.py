@@ -25,13 +25,13 @@ class FeedbackManager:
             
         query="""
         SELECT 
-            sh.hpid,
+            sh.hospital_id,
             sh.created_at,
-            h.name as hospital_name,
-            h.department,
+            h.hp_name as hospital_name,
+            h.hp_department,
             h.clcdnm as hospital_type
         FROM selected_hp sh
-        JOIN hospital h ON sh.hpid=h.hpid
+        JOIN hospital h ON sh.hospital_id=h.id
         WHERE sh.member_id=%s
         ORDER BY sh.created_at DESC
         """
@@ -61,12 +61,12 @@ class FeedbackManager:
             
         query="""
         SELECT 
-            sp.hpid,
+            sp.pharmacy_id,
             sp.created_at,
-            p.dutyname as pharmacy_name,
-            p.dutyaddr as address
+            p.ph_name as pharmacy_name,
+            p.ph_address as address
         FROM selected_ph sp
-        JOIN pharmacy p ON sp.hpid=p.hpid
+        JOIN pharmacy p ON sp.pharmacy_id=p.id
         WHERE sp.member_id=%s
         ORDER BY sp.created_at DESC
         """
@@ -129,10 +129,10 @@ class FeedbackManager:
         try:
             #회원의 병원 로그 조회
             query="""
-            SELECT h.name as hospital_name, sh.id as selected_id
+            SELECT h.hp_name as hospital_name, sh.id as selected_id
             FROM hospital h
-            LEFT JOIN selected_hp sh ON h.hpid=sh.hpid AND sh.member_id=%s
-            WHERE h.name IN %s
+            LEFT JOIN selected_hp sh ON h.id=sh.hospital_id AND sh.member_id=%s
+            WHERE h.hp_name IN %s
             """
             df=pd.read_sql(query, self.db_connection, params=(member_id, tuple(hospital_names)))
             
@@ -170,10 +170,10 @@ class FeedbackManager:
         try:
             #회원의 약국 로그 조회
             query="""
-            SELECT p.dutyname as pharmacy_name, sp.id as selected_id
+            SELECT p.ph_name as pharmacy_name, sp.id as selected_id
             FROM pharmacy p
-            LEFT JOIN selected_ph sp ON p.hpid=sp.hpid AND sp.member_id=%s
-            WHERE p.dutyname IN %s
+            LEFT JOIN selected_ph sp ON p.id=sp.pharmacy_id AND sp.member_id=%s
+            WHERE p.ph_name IN %s
             """
             df=pd.read_sql(query, self.db_connection, params=(member_id, tuple(pharmacy_names)))
             
