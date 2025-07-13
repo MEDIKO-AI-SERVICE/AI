@@ -8,7 +8,11 @@ import schedule
 import threading
 import time
 import os
+import warnings
 from datetime import datetime, timedelta
+
+# 경고 메시지 무시 설정
+warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
 
 def get_db_connection():
     config = configparser.ConfigParser()
@@ -29,11 +33,19 @@ drug_rag_manager = None
 
 def initialize_recommenders():
     global hospital_recommender, pharmacy_recommender, drug_rag_manager
-    db_connection = get_db_connection()
-    hospital_recommender = HospitalRecommender(db_connection=db_connection)
-    pharmacy_recommender = PharmacyRecommender(db_connection=db_connection)
-    drug_rag_manager = DrugRAGManager()
-    drug_rag_manager.initialize_rag_system()
+    try:
+        db_connection = get_db_connection()
+        hospital_recommender = HospitalRecommender(db_connection=db_connection)
+        pharmacy_recommender = PharmacyRecommender(db_connection=db_connection)
+        drug_rag_manager = DrugRAGManager()
+        drug_rag_manager.initialize_rag_system()
+        print("Recommenders initialized successfully")
+    except Exception as e:
+        print(f"Error initializing recommenders: {e}")
+        # 초기화 실패 시에도 기본 인스턴스 생성
+        hospital_recommender = HospitalRecommender()
+        pharmacy_recommender = PharmacyRecommender()
+        drug_rag_manager = DrugRAGManager()
 
 def retrain_models():
     global hospital_recommender, pharmacy_recommender

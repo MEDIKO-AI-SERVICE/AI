@@ -2,6 +2,10 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+import warnings
+
+# 경고 메시지 무시 설정
+warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
 
 from hosp_utils.es_functions import query_elasticsearch_hosp, filtering_hosp
 from pharm_utils.es_functions_for_pharmacy import query_elasticsearch_pharmacy
@@ -17,6 +21,7 @@ from er_utils.for_redis import *
 from utils.direction import calculate_travel_time_and_distance 
 from utils.geocode import address_to_coords, coords_to_address
 from utils.en_juso import get_english_address, get_korean_address
+from utils.department_utils import extract_korean_department
 import pandas as pd
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +45,7 @@ from datetime import datetime, timedelta
 import configparser
 from rag_utils.rag_search import search_similar_diseases
 import pytz
+import re
 
 from app_core import (
     get_db_connection,
@@ -54,15 +60,17 @@ from app_core import (
 
 app = FastAPI()
 
+
+
 #스케줄러 시작
 @app.on_event("startup")
 async def startup_event():
     print("Starting up the application...")
     
-    # 스케줄러 시작
+    #스케줄러 시작
     threading.Thread(target=run_scheduler, daemon=True).start()
     
-    # 추천 모델 초기화 (비동기로)
+    #추천 모델 초기화 (비동기로)
     def init_recommenders():
         try:
             initialize_recommenders()
@@ -72,7 +80,7 @@ async def startup_event():
     
     threading.Thread(target=init_recommenders, daemon=True).start()
     
-    # 약품 RAG 시스템 초기화 (완전히 백그라운드로)
+    #약품 RAG 시스템 초기화 (완전히 백그라운드로)
     def init_drug_rag():
         try:
             print("Initializing drug RAG system in background...")
@@ -86,7 +94,7 @@ async def startup_event():
         except Exception as e:
             print(f"Error initializing drug RAG system: {e}")
     
-    # 백그라운드 스레드에서 RAG 시스템 초기화
+    #백그라운드 스레드에서 RAG 시스템 초기화
     threading.Thread(target=init_drug_rag, daemon=True).start()
     
     print("Application startup completed - services will be available as they initialize")
@@ -95,7 +103,18 @@ async def startup_event():
 async def recommend_hospital(request: Request):
     global hospital_recommender
     if not hospital_recommender:
-        initialize_recommenders()
+        try:
+            initialize_recommenders()
+            # app_core에서 전역 변수 다시 가져오기
+            from app_core import hospital_recommender as global_hospital_recommender
+            hospital_recommender = global_hospital_recommender
+            print("Hospital recommender initialized during request")
+        except Exception as e:
+            print(f"Error initializing hospital recommender: {e}")
+            return JSONResponse(
+                content={"error": "Hospital recommendation system is not available. Please try again later."}, 
+                status_code=503
+            )
 
     data = await request.json()
     print(f"[hospital] Request data: {data}", flush=True)
@@ -103,9 +122,9 @@ async def recommend_hospital(request: Request):
     basic_info = data.get("basic_info")
     health_info = data.get("health_info")
     department = data.get("department", "내과")
-    # department가 리스트인 경우 문자열로 변환, 문자열인 경우 그대로 사용
-    if isinstance(department, list):
-        department = ", ".join(department)
+    
+    #진료과 전처리: 한국어 진료과명만 추출 (리스트/문자열 모두 처리)
+    department = extract_korean_department(department)
     suspected_disease = data.get("suspected_disease")
     primary_hospital = data.get("primary_hospital", False)
     secondary_hospital = data.get("secondary_hospital", False)
@@ -113,7 +132,7 @@ async def recommend_hospital(request: Request):
     member_id = data.get("member_id")
     user_lat = data.get("lat")
     user_lon = data.get("lon")
-    sort_type = data.get("sort_type", "distance")  # "recommend" 또는 "distance"
+    sort_type = data.get("sort_type", "distance").lower()  #"recommend" 또는 "distance"
 
     try:
         coords = address_to_coords(basic_info['address'])
@@ -148,18 +167,18 @@ async def recommend_hospital(request: Request):
     df["transit_travel_time_s"] = df["travel_info"].apply(lambda x: x.get("transit_travel_time_s") if x else None)
     df.drop(columns=["travel_info"], inplace=True)
 
-    # 정렬 타입에 따른 처리
+    #정렬 타입에 따른 처리
     if sort_type == "distance":
-        # 거리순 정렬 (강화학습 없이 거리만 고려)
+        #거리순 정렬 (강화학습 없이 거리만 고려)
         total_travel_time = (
             df['transit_travel_time_h'] * 3600 +
             df['transit_travel_time_m'] * 60 +
             df['transit_travel_time_s']
         )
-        df['similarity'] = 1 / (1 + total_travel_time)  # 거리가 가까울수록 높은 점수
+        df['similarity'] = 1 / (1 + total_travel_time)  #거리가 가까울수록 높은 점수
         recommended_hospitals = df.sort_values(by=["similarity"], ascending=[False])
     else:
-        # 추천순 정렬 (기존 강화학습 로직)
+        #추천순 정렬 (기존 강화학습 로직)
         user_embedding = hospital_recommender.embed_user_profile(basic_info, health_info, suspected_disease, department)
         hospital_embeddings = hospital_recommender.embed_hospital_data(df)
 
@@ -182,7 +201,7 @@ async def recommend_hospital(request: Request):
         recommended_hospitals["address"] = recommended_hospitals["eng_address"]
         recommended_hospitals.drop(columns=["eng_address"], inplace=True)
 
-    # 언어가 한국어가 아닐 때만 로마자 표기 추가
+    #언어가 한국어가 아닐 때만 로마자 표기 추가
     if basic_info.get("language", "").lower() != "ko":
         names = recommended_hospitals["name"].tolist()
         romanized_map = romanize_korean_names(names)
@@ -196,7 +215,18 @@ async def recommend_hospital(request: Request):
 async def recommend_pharmacy(request: Request):
     global pharmacy_recommender
     if not pharmacy_recommender:
-        initialize_recommenders()
+        try:
+            initialize_recommenders()
+            # app_core에서 전역 변수 다시 가져오기
+            from app_core import pharmacy_recommender as global_pharmacy_recommender
+            pharmacy_recommender = global_pharmacy_recommender
+            print("Pharmacy recommender initialized during request")
+        except Exception as e:
+            print(f"Error initializing pharmacy recommender: {e}")
+            return JSONResponse(
+                content={"error": "Pharmacy recommendation system is not available. Please try again later."}, 
+                status_code=503
+            )
     
     data = await request.json()
     print(f"[pharmacy] Request data: {data}", flush=True)
@@ -205,7 +235,7 @@ async def recommend_pharmacy(request: Request):
     user_lon = data.get('lon')
     basic_info = data.get("basic_info")
     member_id = data.get("member_id")
-    sort_type = data.get("sort_type", "distance")  # "recommend" 또는 "distance"
+    sort_type = data.get("sort_type", "distance").lower()  #"recommend" 또는 "distance"
 
     try:
         coords = address_to_coords(basic_info['address'])
@@ -248,18 +278,18 @@ async def recommend_pharmacy(request: Request):
         for col in ["transit_travel_distance_km", "transit_travel_time_h", "transit_travel_time_m", "transit_travel_time_s"]:
             df.loc[df[col].isnull(), col] = 0
 
-        # 정렬 타입에 따른 처리
+        #정렬 타입에 따른 처리
         if sort_type == "distance":
-            # 거리순 정렬 (강화학습 없이 거리만 고려)
+            #거리순 정렬 (강화학습 없이 거리만 고려)
             total_travel_time = (
                 df['transit_travel_time_h'] * 3600 +
                 df['transit_travel_time_m'] * 60 +
                 df['transit_travel_time_s']
             )
-            df['similarity'] = 1 / (1 + total_travel_time)  # 거리가 가까울수록 높은 점수
+            df['similarity'] = 1 / (1 + total_travel_time)  #거리가 가까울수록 높은 점수
             recommended_pharmacies = df.sort_values(by=["similarity"], ascending=[False])
         else:
-            # 추천순 정렬 (기존 강화학습 로직)
+            #추천순 정렬 (기존 강화학습 로직)
             recommended_pharmacies = pharmacy_recommender.recommend_pharmacies(df, member_id=member_id)
 
         recommended_pharmacies = recommended_pharmacies.sort_values(by=["similarity"], ascending=[False])
@@ -272,7 +302,7 @@ async def recommend_pharmacy(request: Request):
             recommended_pharmacies["address"] = recommended_pharmacies["eng_address"]
             recommended_pharmacies.drop(columns=["eng_address"], inplace=True)
 
-        # 언어가 한국어가 아닐 때만 로마자 표기 추가
+        #언어가 한국어가 아닐 때만 로마자 표기 추가
         if basic_info.get("language").lower() != "ko":
             names = recommended_pharmacies["dutyname"].tolist()
             romanized_map = romanize_korean_names(names)
@@ -363,7 +393,7 @@ async def recommend_er(request: Request):
         filtered_df["dutyAddr"] = filtered_df["eng_address"]
         filtered_df.drop(columns=["eng_address"], inplace=True)
 
-    # 언어가 한국어가 아닐 때만 로마자 표기 추가
+    #언어가 한국어가 아닐 때만 로마자 표기 추가
     if basic_info.get("language").lower() != "ko":
         names = filtered_df["dutyName"].tolist()
         romanized_map = romanize_korean_names(names)
@@ -387,7 +417,7 @@ async def get_expression_adjectives(request: Request):
         if not body_part or not language:
             return JSONResponse(content={"error": "Both 'body_part' and 'language' are required"}, status_code=400)
 
-        # GPT를 통한 형용사 생성
+        #GPT를 통한 형용사 생성
         adjectives = get_body_part_adjectives(body_part, language)
 
         final_response = {
@@ -428,7 +458,7 @@ async def recommend_drug_for_symptom(request: Request):
         t0 = time.time()
         if not symptom:
             return JSONResponse(content={"error": "Symptom is required"}, status_code=400)
-        # RAG 시스템이 준비되지 않은 경우
+        #RAG 시스템이 준비되지 않은 경우
         if not drug_rag_manager or not drug_rag_manager.is_ready():
             if drug_rag_manager and drug_rag_manager.is_initializing:
                 return JSONResponse(
@@ -453,7 +483,7 @@ async def recommend_drug_for_symptom(request: Request):
         t0 = time.time()
         if not result:
             return JSONResponse(content={"error": "Failed to get drug recommendation"}, status_code=500)
-        # Translate only drug_purpose if language is not Korean
+        #Translate only drug_purpose if language is not Korean
         drug_purpose = result.get("drug_purpose", "")
         if language != "ko" and language != "KO":
             try:
@@ -487,7 +517,7 @@ async def get_drug_rag_status():
         
         status = drug_rag_manager.get_system_status()
         
-        # 추가 정보
+        #추가 정보
         status.update({
             "system_ready": drug_rag_manager.is_ready()
         })
@@ -525,13 +555,13 @@ async def pre_question_2(request: Request):
         department_ko = select_department_for_symptoms(symptoms_for_llm)
         print(f"[latency] 진료과 선정(LLM): {time.time() - t0:.3f}초", flush=True)
         t0 = time.time()
-        # 진료과 설명 (언어별)
+        #진료과 설명 (언어별)
         department_description_dict = DEPARTMENT_DESCRIPTIONS.get(department_ko, {})
         department_description = department_description_dict.get(language, department_description_dict.get("KO", ""))
         
         translations = DEPARTMENT_TRANSLATIONS.get(department_ko, {})
         romanized = DEPARTMENT_ROMANIZATION.get(department_ko, "")
-        translated = translations.get(language, department_ko)  # fallback to Korean if not found
+        translated = translations.get(language, department_ko)  #fallback to Korean if not found
         if language == "KO":
             department_field = department_ko
         else:
@@ -621,13 +651,13 @@ async def process_symptoms(request: Request):
         department_ko = analysis_result["department_ko"]
         symptom_summary = analysis_result["symptom_summary"]
         summary_text = analysis_result["summary_text"]
-        # 진료과 설명 (언어별)
+        #진료과 설명 (언어별)
         department_description_dict = DEPARTMENT_DESCRIPTIONS.get(department_ko, {})
         department_description = department_description_dict.get(language, department_description_dict.get("KO", ""))
         
         translations = DEPARTMENT_TRANSLATIONS.get(department_ko, {})
         romanized = DEPARTMENT_ROMANIZATION.get(department_ko, "")
-        translated = translations.get(language, department_ko)  # fallback to Korean if not found
+        translated = translations.get(language, department_ko)  #fallback to Korean if not found
         if language == "KO":
             department_field = department_ko
         else:
