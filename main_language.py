@@ -29,11 +29,10 @@ def get_main_language(member_id):
     connection = pymysql.connect(**DB_CONFIG)
     try:
         with connection.cursor() as cursor:
-            #한 번의 쿼리로 'member_id' 및 'main_language' 조회
+            #member 테이블에서 직접 language 조회
             sql = """
-            SELECT b.language FROM basic_info b
-            JOIN member m ON m.id = b.member_id
-            WHERE m.id = %s
+            SELECT language FROM member
+            WHERE id = %s
             """
             cursor.execute(sql, (member_id,))
             
