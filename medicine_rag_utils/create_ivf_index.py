@@ -32,7 +32,12 @@ def create_drug_ivf_index():
         with open(embeddings_file, 'rb') as f:
             embeddings = pickle.load(f)
         
-        print(f"Loaded {len(embeddings)} drug embeddings with shape {embeddings.shape}")
+        # embeddings를 numpy array로 변환
+        if isinstance(embeddings, list):
+            embeddings = np.array(embeddings, dtype=np.float32)
+            print(f"Converted embeddings from list to numpy array with shape: {embeddings.shape}")
+        else:
+            print(f"Loaded {len(embeddings)} drug embeddings with shape {embeddings.shape}")
         
         # 데이터 크기에 맞게 nlist 조정
         nlist = min(100, max(10, len(embeddings) // 10))
