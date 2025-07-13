@@ -166,7 +166,23 @@ class HospitalRecommender:
         similarity_scores=cosine_similarity(user_embedding.reshape(1, -1), hospital_embeddings)[0]
         hospitals_df['content_score']=(similarity_scores + 1) / 2  #-1~1 -> 0~1
         
-        #3. 정책 네트워크를 통한 행동 확률 계산 (REINFORCE)
+        #3. 사용자 로그 확인
+        has_user_logs = False
+        if member_id and self.feedback_manager:
+            feedback_data = self.feedback_manager.get_hospital_feedback(member_id)
+            has_user_logs = not feedback_data.empty
+        
+        #4. 로그가 없는 경우: 기본 점수와 콘텐츠 점수를 결합하여 정렬
+        if not has_user_logs:
+            print(f"No user logs found for member_id: {member_id}, using hybrid ranking (distance + content)")
+            # 기본 점수(40%) + 콘텐츠 점수(60%) 결합
+            hospitals_df['similarity'] = 0.4 * base_scores + 0.6 * hospitals_df['content_score']
+            recommended = hospitals_df.nlargest(self.K, 'similarity')
+            recommended = recommended.drop(columns=['base_score', 'content_score'])
+            return recommended
+        
+        #5. 로그가 있는 경우: 기존 강화학습 로직 사용
+        # 정책 네트워크를 통한 행동 확률 계산 (REINFORCE)
         with torch.no_grad():
             #각 병원의 임베딩에 대해 정책 확률 계산
             policy_probs=[]
@@ -178,33 +194,32 @@ class HospitalRecommender:
             
             hospitals_df['policy_prob']=policy_probs
         
-        #4. Top-K Off-Policy Correction 적용
+        #6. Top-K Off-Policy Correction 적용
         hospitals_df['importance_weight']=1.0 / (hospitals_df['policy_prob'] + 1e-8)
         
-        #5. 보상 계산 및 정렬
+        #7. 보상 계산 및 정렬
         rewards=[]
         for idx, row in hospitals_df.iterrows():
             reward=self.calculate_reward(row, user_embedding, hospital_embeddings[idx], member_id)
             rewards.append(reward)
         hospitals_df['reward']=rewards
         
-        #6. 로그 체크 및 보너스 점수 추가
-        if member_id and self.feedback_manager:
-            hospital_names=hospitals_df['name'].tolist()
-            bonus_scores=self.feedback_manager.check_hospital_logs(member_id, hospital_names)
-            
-            #보너스 점수 적용
-            for idx, row in hospitals_df.iterrows():
-                if row['name'] in bonus_scores:
-                    hospitals_df.at[idx, 'reward'] += bonus_scores[row['name']]
+        #8. 로그 체크 및 보너스 점수 추가
+        hospital_names=hospitals_df['name'].tolist()
+        bonus_scores=self.feedback_manager.check_hospital_logs(member_id, hospital_names)
         
-        #7. 최종 점수 계산 (보상 * 중요도 가중치) - similarity 컬럼에 저장
+        #보너스 점수 적용
+        for idx, row in hospitals_df.iterrows():
+            if row['name'] in bonus_scores:
+                hospitals_df.at[idx, 'reward'] += bonus_scores[row['name']]
+        
+        #9. 최종 점수 계산 (보상 * 중요도 가중치) - similarity 컬럼에 저장
         hospitals_df['similarity']=hospitals_df['reward'] * hospitals_df['importance_weight']
         
-        #8. 상위 K개 선택
+        #10. 상위 K개 선택
         recommended=hospitals_df.nlargest(self.K, 'similarity')
         
-        #9. 불필요한 컬럼 제거
+        #11. 불필요한 컬럼 제거
         recommended=recommended.drop(columns=['policy_prob', 'importance_weight', 'reward', 'base_score', 'content_score'])
         
         return recommended
